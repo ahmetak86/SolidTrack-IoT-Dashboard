@@ -1,9 +1,12 @@
-# backend/database.py (HATA DÜZELTİLDİ: JOINEDLOAD EKLENDİ)
+# backend/database.py (TÜM PARÇALAR BİRLEŞTİRİLDİ)
 import os
-from datetime import datetime
+import uuid # <-- YENİ EKLENDİ (Şifre üretmek için)
+from datetime import datetime, timedelta
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, joinedload # <-- joinedload EKLENDİ!
-from backend.models import Base, User, Device, TelemetryLog, UtilizationLog, ReportSubscription, GeoSite, AlarmEvent
+from sqlalchemy.orm import sessionmaker, joinedload
+
+# BURASI ÇOK ÖNEMLİ: ShareLink'i buraya ekledik
+from backend.models import Base, User, Device, TelemetryLog, UtilizationLog, ReportSubscription, GeoSite, AlarmEvent, ShareLink
 
 # --- AKILLI ADRES AYARI ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -141,7 +144,7 @@ def delete_geosite(site_id):
     return False
 
 # ---------------------------------------------------------
-# ALARM FONKSİYONLARI (BURASI DÜZELDİ)
+# ALARM FONKSİYONLARI
 # ---------------------------------------------------------
 def create_alarm(device_id, type, severity, value, desc):
     db = SessionLocal()
@@ -163,13 +166,9 @@ def create_alarm(device_id, type, severity, value, desc):
 
 def get_alarms(active_only=True):
     db = SessionLocal()
-    # DÜZELTME: options(joinedload(...)) ile veriyi peşin çekiyoruz.
-    # Artık kapı kapansa bile alarmın içinde cihaz bilgisi hazır oluyor.
     query = db.query(AlarmEvent).options(joinedload(AlarmEvent.device)).order_by(AlarmEvent.timestamp.desc())
-    
     if active_only:
         query = query.filter(AlarmEvent.is_active == True)
-    
     alarms = query.all()
     db.close()
     return alarms
@@ -189,3 +188,161 @@ def acknowledge_alarm(alarm_id, user_name):
     finally:
         db.close()
     return False
+
+# ---------------------------------------------------------
+# RAPOR FONKSİYONLARI (YENİ)
+# ---------------------------------------------------------
+def get_daily_utilization(device_id, days=7):
+    db = SessionLocal()
+    end_date = datetime.utcnow()
+    start_date = end_date - timedelta(days=days)
+    
+    logs = db.query(TelemetryLog).filter(
+        TelemetryLog.device_id == device_id,
+        TelemetryLog.timestamp >= start_date
+    ).order_by(TelemetryLog.timestamp.asc()).all()
+    
+    db.close()
+    
+    daily_stats = {}
+    for i in range(days):
+        d_str = (end_date - timedelta(days=i)).strftime("%Y-%m-%d")
+        daily_stats[d_str] = {"hours": 0, "distance": 0, "max_speed": 0}
+
+    for log in logs:
+        day_str = log.timestamp.strftime("%Y-%m-%d")
+        if day_str in daily_stats:
+            if log.speed_kmh > 1:
+                daily_stats[day_str]["hours"] += 0.25 
+            if log.speed_kmh > 0:
+                daily_stats[day_str]["distance"] += (log.speed_kmh * 0.25)
+            if log.speed_kmh > daily_stats[day_str]["max_speed"]:
+                daily_stats[day_str]["max_speed"] = log.speed_kmh
+
+    result = []
+    for date, stat in daily_stats.items():
+        result.append({
+            "Tarih": date,
+            "Çalışma Saati": round(stat["hours"], 1),
+            "Mesafe (km)": round(stat["distance"], 1),
+            "Max Hız": stat["max_speed"]
+        })
+    result.sort(key=lambda x: x["Tarih"])
+    return result
+
+def get_fleet_summary_report():
+    db = SessionLocal()
+    devices = db.query(Device).all()
+    summary = []
+    for d in devices:
+        last_24h = datetime.utcnow() - timedelta(days=1)
+        logs_count = db.query(TelemetryLog).filter(
+            TelemetryLog.device_id == d.device_id,
+            TelemetryLog.timestamp >= last_24h,
+            TelemetryLog.speed_kmh > 0
+        ).count()
+        work_hours = logs_count * 0.25
+        summary.append({
+            "Makine": d.unit_name,
+            "Model": d.asset_model,
+            "Bugün Çalışma": f"{work_hours} Saat",
+            "Durum": "Aktif" if d.is_active else "Pasif"
+        })
+    db.close()
+    return summary
+
+# ---------------------------------------------------------
+# PUBLIC LINK (PAYLAŞIM) FONKSİYONLARI (YENİ)
+# ---------------------------------------------------------
+def create_share_link(user_id, device_id, days=7):
+    """Cihaz için rastgele token (link) üretir"""
+    db = SessionLocal()
+    token = str(uuid.uuid4()) 
+    
+    link = ShareLink(
+        token=token,
+        device_id=device_id,
+        created_by=user_id,
+        expires_at=datetime.utcnow() + timedelta(days=days),
+        is_active=True
+    )
+    db.add(link)
+    db.commit()
+    db.close()
+    return token
+
+def get_active_share_link(token):
+    """Token geçerli mi diye bakar, geçerliyse cihazı döner"""
+    db = SessionLocal()
+    link = db.query(ShareLink).filter(ShareLink.token == token).first()
+    
+    result = None
+    if link and link.is_active:
+        if link.expires_at > datetime.utcnow():
+            # Cihaz verisini çek (Peşin yükleme ile)
+            device = db.query(Device).filter(Device.device_id == link.device_id).first()
+            result = device
+        else:
+            # Süresi dolmuş
+            link.is_active = False
+            db.commit()
+            
+    db.close()
+    return result
+
+def revoke_share_link(token):
+    """Linki iptal eder (Unshare)"""
+    db = SessionLocal()
+    link = db.query(ShareLink).filter(ShareLink.token == token).first()
+    if link:
+        link.is_active = False
+        db.commit()
+    db.close()
+
+    # backend/database.py dosyasının EN ALTINA ekle:
+
+def get_last_operation_stats(device_id):
+    """
+    Cihazın son çalışma periyodunu hesaplar.
+    Mantık: Geriye doğru tarar, hız > 0 olan son anı bulur.
+    """
+    db = SessionLocal()
+    # Son hareket ettiği zamanı bul
+    last_move = db.query(TelemetryLog).filter(
+        TelemetryLog.device_id == device_id, 
+        TelemetryLog.speed_kmh > 0
+    ).order_by(TelemetryLog.timestamp.desc()).first()
+    
+    result = {
+        "last_seen": "Uzun süredir sinyal yok",
+        "duration": "0 dk",
+        "address": "Konum verisi bekleniyor" # Gerçekte Reverse Geocoding yapılır
+    }
+    
+    if last_move:
+        # Son görülme zamanı
+        diff = datetime.utcnow() - last_move.timestamp
+        days = diff.days
+        hours = int(diff.seconds / 3600)
+        mins = int((diff.seconds % 3600) / 60)
+        
+        time_str = ""
+        if days > 0: time_str += f"{days} gün "
+        if hours > 0: time_str += f"{hours} sa "
+        time_str += f"{mins} dk önce"
+        
+        result["last_seen"] = time_str
+        
+        # Basit Simülasyon: Son çalışma süresi (Rastgele gerçekçi veri üretelim demo için)
+        # Gerçekte start-stop loglarına bakılır.
+        import random
+        simulated_duration = random.choice([45, 120, 210, 30]) 
+        h = int(simulated_duration / 60)
+        m = simulated_duration % 60
+        result["duration"] = f"{h} saat {m} dakika"
+        
+        # Adres Simülasyonu (Koordinata göre ilçe tahmini zordur kütüphanesiz)
+        result["address"] = "Ostim OSB, 1234. Cadde, Yenimahalle/ANKARA"
+
+    db.close()
+    return result

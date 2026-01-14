@@ -1,14 +1,16 @@
-# backend/models.py (GÜNCELLENMİŞ HALİ)
+# backend/models.py (FİNAL - CSV UYUMLU & ADRES EKLENDİ)
 from sqlalchemy import Column, String, Integer, Float, Boolean, DateTime, ForeignKey
 from sqlalchemy.orm import declarative_base, relationship
 from datetime import datetime
 
 Base = declarative_base()
 
-# 1. KULLANICILAR
+# ---------------------------------------------------------
+# 1. KULLANICILAR (CSV'deki gibi String ID)
+# ---------------------------------------------------------
 class User(Base):
     __tablename__ = 'users'
-    id = Column(String, primary_key=True)
+    id = Column(String, primary_key=True) # Örn: "CUST_001"
     username = Column(String, unique=True, nullable=False)
     email = Column(String, unique=True, nullable=False)
     password_hash = Column(String, nullable=False)
@@ -42,15 +44,22 @@ class User(Base):
     
     # İlişkiler
     devices = relationship("Device", back_populates="owner")
-    geosites = relationship("GeoSite", back_populates="owner") # YENİ EKLENDİ
+    geosites = relationship("GeoSite", back_populates="owner")
 
-# 2. CİHAZLAR
+# ---------------------------------------------------------
+# 2. CİHAZLAR (Adres Sütunu Eklendi!)
+# ---------------------------------------------------------
 class Device(Base):
     __tablename__ = 'devices'
     device_id = Column(String, primary_key=True)
     owner_id = Column(String, ForeignKey('users.id'))
     unit_name = Column(String)
     asset_model = Column(String)
+    
+    # --- YENİ EKLENEN KRİTİK SÜTUN ---
+    address = Column(String, default="Konum Yok") 
+    # ---------------------------------
+
     initial_hours_offset = Column(Float, default=0.0) 
     min_battery_threshold = Column(Integer, default=20) 
     notification_email = Column(String) 
@@ -64,12 +73,15 @@ class Device(Base):
 
     owner = relationship("User", back_populates="devices")
     telemetry_logs = relationship("TelemetryLog", back_populates="device")
-    utilization_logs = relationship("UtilizationLog", back_populates="device") # Eksik ilişki tamamlandı
+    utilization_logs = relationship("UtilizationLog", back_populates="device")
+    alarms = relationship("AlarmEvent", back_populates="device") # Alarm ilişkisi
 
+# ---------------------------------------------------------
 # 3. LOGLAR
+# ---------------------------------------------------------
 class TelemetryLog(Base):
     __tablename__ = 'telemetry_logs'
-    log_id = Column(String, primary_key=True)
+    log_id = Column(String, primary_key=True) # Örn: "LOG_123"
     device_id = Column(String, ForeignKey('devices.device_id'))
     timestamp = Column(DateTime, default=datetime.utcnow)
     latitude = Column(Float)
@@ -80,6 +92,7 @@ class TelemetryLog(Base):
     max_shock_g = Column(Float)
     tilt_deg = Column(Float)
     humidity_pct = Column(Float)
+    
     device = relationship("Device", back_populates="telemetry_logs")
 
 class UtilizationLog(Base):
@@ -90,6 +103,7 @@ class UtilizationLog(Base):
     total_work_min = Column(Integer)
     motion_work_min = Column(Integer)
     daily_efficiency = Column(Float)
+    
     device = relationship("Device", back_populates="utilization_logs")
 
 class ReportSubscription(Base):
@@ -99,55 +113,59 @@ class ReportSubscription(Base):
     report_type = Column(String)
     frequency = Column(String) 
     email_recipients = Column(String)
+    is_active = Column(Boolean, default=True) # Eksikti, ekledim
+    
     user = relationship("User")
 
-# --- YENİ EKLENEN SINIF: GEOSITE (BÖLGE YÖNETİMİ) ---
+# ---------------------------------------------------------
+# 4. GEOSITE (BÖLGE YÖNETİMİ)
+# ---------------------------------------------------------
 class GeoSite(Base):
     __tablename__ = 'geosites'
-    
     site_id = Column(Integer, primary_key=True, autoincrement=True)
     owner_id = Column(String, ForeignKey('users.id'))
-    
-    # Temel Bilgiler
-    name = Column(String, nullable=False) # Örn: "Kadıköy Ev"
-    address = Column(String) # Açık adres
+    name = Column(String, nullable=False)
+    address = Column(String)
     latitude = Column(Float, nullable=False)
     longitude = Column(Float, nullable=False)
-    radius_meters = Column(Integer, default=500) # Çap (Yarıçap)
+    radius_meters = Column(Integer, default=500)
     
-    # Gelişmiş Ayarlar (Advanced Settings)
-    visible_to_subgroups = Column(Boolean, default=False) # Sadece Admin görür
+    visible_to_subgroups = Column(Boolean, default=False)
     apply_to_all_devices = Column(Boolean, default=True)
     auto_enable_new_devices = Column(Boolean, default=True)
     auto_enable_alarms = Column(Boolean, default=True)
-    
     created_at = Column(DateTime, default=datetime.utcnow)
     
     owner = relationship("User", back_populates="geosites")
 
-    # backend/models.py dosyasının EN ALTINA ekle:
-
 # ---------------------------------------------------------
-# 6. ALARM OLAYLARI (YENİ TABLO)
+# 5. ALARM OLAYLARI
 # ---------------------------------------------------------
 class AlarmEvent(Base):
     __tablename__ = 'alarm_events'
-    
     id = Column(Integer, primary_key=True, autoincrement=True)
     device_id = Column(String, ForeignKey('devices.device_id'))
-    
-    # Alarm Detayları
-    alarm_type = Column(String)  # 'LowBattery', 'Shock', 'Geofence', 'Speed', 'Offline'
-    severity = Column(String)    # 'Critical', 'Warning', 'Info'
-    value = Column(String)       # Örn: "9.2 G", "%12", "120 km/h"
-    description = Column(String) # Örn: "Batı Şantiyesi dışına çıkıldı"
-    
-    # Durum
-    is_active = Column(Boolean, default=True) # True: Bekliyor, False: Okundu/Arşiv
-    acknowledged_by = Column(String)          # Kim okudu?
-    acknowledged_at = Column(DateTime)        # Ne zaman okudu?
-    
+    alarm_type = Column(String)
+    severity = Column(String)
+    value = Column(String)
+    description = Column(String)
+    is_active = Column(Boolean, default=True)
+    acknowledged_by = Column(String)
+    acknowledged_at = Column(DateTime)
     timestamp = Column(DateTime, default=datetime.utcnow)
     
-    # İlişki
+    device = relationship("Device", back_populates="alarms")
+
+# ---------------------------------------------------------
+# 6. PUBLIC LINK (PAYLAŞIM SİSTEMİ)
+# ---------------------------------------------------------
+class ShareLink(Base):
+    __tablename__ = 'share_links'
+    token = Column(String, primary_key=True)
+    device_id = Column(String, ForeignKey('devices.device_id'))
+    created_by = Column(String, ForeignKey('users.id')) # String ID'ye çevrildi
+    expires_at = Column(DateTime)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
     device = relationship("Device")
