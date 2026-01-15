@@ -161,11 +161,16 @@ class AlarmEvent(Base):
 # ---------------------------------------------------------
 class ShareLink(Base):
     __tablename__ = 'share_links'
+    
     token = Column(String, primary_key=True)
     device_id = Column(String, ForeignKey('devices.device_id'))
-    created_by = Column(String, ForeignKey('users.id')) # String ID'ye çevrildi
+    created_by = Column(String, ForeignKey('users.id'))
     expires_at = Column(DateTime)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     
+    # --- YENİ EKLENEN SÜTUN ---
+    note = Column(String, nullable=True) # Örn: "Mehmet Bey - Batı Şantiyesi"
+    
+    # İlişkiler
     device = relationship("Device")

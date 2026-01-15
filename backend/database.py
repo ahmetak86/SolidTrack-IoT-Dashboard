@@ -252,18 +252,23 @@ def get_fleet_summary_report():
     return summary
 
 # ---------------------------------------------------------
-# PUBLIC LINK (PAYLAŞIM) FONKSİYONLARI (YENİ)
+# 7. PUBLIC LINK (PAYLAŞIM) FONKSİYONLARI (V2 - GÜNCEL)
 # ---------------------------------------------------------
-def create_share_link(user_id, device_id, days=7):
-    """Cihaz için rastgele token (link) üretir"""
+
+def create_share_link(user_id, device_id, expires_at_dt, note=""):
+    """
+    Belirli bir tarihe kadar geçerli link üretir.
+    expires_at_dt: datetime objesi olmalı.
+    """
     db = SessionLocal()
-    token = str(uuid.uuid4()) 
+    token = str(uuid.uuid4()) # Uzun güvenli token
     
     link = ShareLink(
         token=token,
         device_id=device_id,
         created_by=user_id,
-        expires_at=datetime.utcnow() + timedelta(days=days),
+        expires_at=expires_at_dt,
+        note=note,
         is_active=True
     )
     db.add(link)
@@ -271,27 +276,36 @@ def create_share_link(user_id, device_id, days=7):
     db.close()
     return token
 
+def get_device_share_links(device_id):
+    """Bir cihaza ait AKTİF paylaşım linklerini getirir (YENİ)"""
+    db = SessionLocal()
+    links = db.query(ShareLink).filter(
+        ShareLink.device_id == device_id,
+        ShareLink.is_active == True,
+        ShareLink.expires_at > datetime.utcnow()
+    ).order_by(ShareLink.created_at.desc()).all()
+    db.close()
+    return links
+
 def get_active_share_link(token):
-    """Token geçerli mi diye bakar, geçerliyse cihazı döner"""
+    """Misafir girişi için token kontrolü"""
     db = SessionLocal()
     link = db.query(ShareLink).filter(ShareLink.token == token).first()
     
     result = None
     if link and link.is_active:
         if link.expires_at > datetime.utcnow():
-            # Cihaz verisini çek (Peşin yükleme ile)
             device = db.query(Device).filter(Device.device_id == link.device_id).first()
             result = device
         else:
-            # Süresi dolmuş
-            link.is_active = False
+            link.is_active = False # Süresi dolmuşsa pasife çek
             db.commit()
             
     db.close()
     return result
 
 def revoke_share_link(token):
-    """Linki iptal eder (Unshare)"""
+    """Linki iptal eder (Kırmızı Buton)"""
     db = SessionLocal()
     link = db.query(ShareLink).filter(ShareLink.token == token).first()
     if link:
@@ -299,7 +313,10 @@ def revoke_share_link(token):
         db.commit()
     db.close()
 
-    # backend/database.py dosyasının EN ALTINA ekle:
+
+# ---------------------------------------------------------
+# 8. CİHAZ İSTATİSTİK FONKSİYONU (Bunu koruyoruz!)
+# ---------------------------------------------------------
 
 def get_last_operation_stats(device_id):
     """
@@ -316,7 +333,7 @@ def get_last_operation_stats(device_id):
     result = {
         "last_seen": "Uzun süredir sinyal yok",
         "duration": "0 dk",
-        "address": "Konum verisi bekleniyor" # Gerçekte Reverse Geocoding yapılır
+        "address": "Konum verisi bekleniyor"
     }
     
     if last_move:
@@ -333,15 +350,14 @@ def get_last_operation_stats(device_id):
         
         result["last_seen"] = time_str
         
-        # Basit Simülasyon: Son çalışma süresi (Rastgele gerçekçi veri üretelim demo için)
-        # Gerçekte start-stop loglarına bakılır.
+        # Basit Simülasyon: Son çalışma süresi
         import random
         simulated_duration = random.choice([45, 120, 210, 30]) 
         h = int(simulated_duration / 60)
         m = simulated_duration % 60
         result["duration"] = f"{h} saat {m} dakika"
         
-        # Adres Simülasyonu (Koordinata göre ilçe tahmini zordur kütüphanesiz)
+        # Adres Simülasyonu
         result["address"] = "Ostim OSB, 1234. Cadde, Yenimahalle/ANKARA"
 
     db.close()
