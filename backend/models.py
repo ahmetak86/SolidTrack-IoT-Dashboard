@@ -55,9 +55,10 @@ class Device(Base):
     owner_id = Column(String, ForeignKey('users.id'))
     unit_name = Column(String)
     asset_model = Column(String)
-    
+    is_active = Column(Boolean, default=True)
     # --- YENİ EKLENEN KRİTİK SÜTUN ---
     address = Column(String, default="Konum Yok") 
+    icon_type = Column(String, default="truck") # Varsayılan ikon 'truck' olsun
     # ---------------------------------
 
     initial_hours_offset = Column(Float, default=0.0) 

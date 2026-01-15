@@ -3,6 +3,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 from backend.database import get_user_devices, get_daily_utilization, get_fleet_summary_report, get_all_devices_for_admin
+from backend.pdf_generator import create_device_pdf
 
 def load_view(user):
     st.title("📈 Operasyonel Raporlar")
@@ -84,12 +85,38 @@ def load_view(user):
     st.dataframe(df_fleet, use_container_width=True)
 
     # --- EXPORT ALANI ---
+    st.markdown("---")
     c_ex1, c_ex2 = st.columns([3, 1])
+    
+    with c_ex1:
+        st.info("💡 Raporu indirmek için yandaki butonu kullanabilirsiniz.")
+
     with c_ex2:
-        st.download_button(
-            label="📥 Raporu PDF İndir",
-            data="Demo PDF Content",
-            file_name="SolidTrack_Rapor.pdf",
-            mime="application/pdf",
-            use_container_width=True
-        )
+        # PDF Oluşturma Mantığı
+        if report_type == "Verimlilik (Utilization)" and 'df' in locals() and not df.empty:
+            
+            # PDF için özet verileri hazırla
+            stats = {
+                "total": df["Çalışma Saati"].sum(),
+                "avg": round(df["Çalışma Saati"].mean(), 1),
+                "score": "88" # Şimdilik sabit, formüle bağlanabilir
+            }
+            
+            # PDF Binary verisini al
+            pdf_bytes = create_device_pdf(selected_device_name, data, stats)
+            
+            st.download_button(
+                label="📥 Raporu PDF İndir",
+                data=pdf_bytes,
+                file_name=f"SolidTrack_{selected_device_name}_Rapor.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+                type="primary"
+            )
+        else:
+            st.download_button(
+                label="📥 Raporu PDF İndir",
+                data="Veri seçilmedi.",
+                disabled=True,
+                use_container_width=True
+            )

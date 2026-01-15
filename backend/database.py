@@ -255,24 +255,44 @@ def get_fleet_summary_report():
 # 7. PUBLIC LINK (PAYLAŞIM) FONKSİYONLARI (V2 - GÜNCEL)
 # ---------------------------------------------------------
 
+# backend/database.py -> create_share_link fonksiyonunu GÜNCELLE
+
 def create_share_link(user_id, device_id, expires_at_dt, note=""):
     """
-    Belirli bir tarihe kadar geçerli link üretir.
-    expires_at_dt: datetime objesi olmalı.
+    V2: Aynı 'note' (isim) ile aktif bir link varsa yenisini oluşturmaz,
+    mevcut olanın süresini günceller ve aynı token'ı döner.
     """
     db = SessionLocal()
-    token = str(uuid.uuid4()) # Uzun güvenli token
     
-    link = ShareLink(
-        token=token,
-        device_id=device_id,
-        created_by=user_id,
-        expires_at=expires_at_dt,
-        note=note,
-        is_active=True
-    )
-    db.add(link)
-    db.commit()
+    # 1. Aynı cihaza, aynı isimle (note), iptal edilmemiş (active) bir link var mı?
+    existing_link = db.query(ShareLink).filter(
+        ShareLink.device_id == device_id,
+        ShareLink.note == note,
+        ShareLink.is_active == True
+    ).first()
+
+    if existing_link:
+        # --- VARSA GÜNCELLE ---
+        # Sadece tarihini güncelle, token aynı kalsın.
+        existing_link.expires_at = expires_at_dt
+        # Eğer süresi dolmuşsa ve tekrar canlandırılıyorsa created_at güncellenebilir
+        existing_link.created_at = datetime.utcnow() 
+        token = existing_link.token
+        db.commit()
+    else:
+        # --- YOKSA OLUŞTUR ---
+        token = str(uuid.uuid4()) # Yeni Token
+        link = ShareLink(
+            token=token,
+            device_id=device_id,
+            created_by=user_id,
+            expires_at=expires_at_dt,
+            note=note,
+            is_active=True
+        )
+        db.add(link)
+        db.commit()
+    
     db.close()
     return token
 
@@ -320,11 +340,14 @@ def revoke_share_link(token):
 
 def get_last_operation_stats(device_id):
     """
-    Cihazın son çalışma periyodunu hesaplar.
-    Mantık: Geriye doğru tarar, hız > 0 olan son anı bulur.
+    Cihazın son çalışma periyodunu hesaplar ve GERÇEK ADRESİ çeker.
     """
     db = SessionLocal()
-    # Son hareket ettiği zamanı bul
+    
+    # 1. Cihazın kendisini çekelim (Adres için)
+    device = db.query(Device).filter(Device.device_id == device_id).first()
+    
+    # 2. Son hareket ettiği zamanı bul
     last_move = db.query(TelemetryLog).filter(
         TelemetryLog.device_id == device_id, 
         TelemetryLog.speed_kmh > 0
@@ -333,7 +356,8 @@ def get_last_operation_stats(device_id):
     result = {
         "last_seen": "Uzun süredir sinyal yok",
         "duration": "0 dk",
-        "address": "Konum verisi bekleniyor"
+        # BURASI DÜZELDİ: Veritabanındaki gerçek adresi alıyoruz
+        "address": device.address if (device and device.address) else "Konum verisi bekleniyor"
     }
     
     if last_move:
@@ -356,9 +380,6 @@ def get_last_operation_stats(device_id):
         h = int(simulated_duration / 60)
         m = simulated_duration % 60
         result["duration"] = f"{h} saat {m} dakika"
-        
-        # Adres Simülasyonu
-        result["address"] = "Ostim OSB, 1234. Cadde, Yenimahalle/ANKARA"
 
     db.close()
     return result
