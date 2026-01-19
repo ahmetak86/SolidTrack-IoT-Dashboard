@@ -9,8 +9,18 @@ from streamlit_folium import st_folium
 # Backend modüllerini bulabilmesi için bir üst dizini yola ekliyoruz
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-# --- IMPORTLAR ---
-from views import dashboard, map, inventory, analysis, alarms, geofence, settings, reports
+# --- IMPORTLAR (DÜZELTİLDİ: Hepsi 'views' altından çağırıldı) ---
+from views import (
+    dashboard, 
+    map, 
+    inventory, 
+    alarms, 
+    geofence, 
+    settings, 
+    reports, 
+    ai_analysis,  # İsmi değişen dosya
+    solid_ai      # Yeni oluşturduğumuz asistan
+)
 from backend.database import login_user, get_active_share_link, get_device_telemetry, get_last_operation_stats
 
 # --- SAYFA AYARI ---
@@ -39,7 +49,7 @@ st.markdown("""
         background-color: transparent;
         color: #31333F;
         cursor: pointer;
-        display: block !important; /* Blok yaparak tam genişlik sağlar */
+        display: block !important;
     }
 
     /* 3. Hover (Üzerine Gelince) Efekti */
@@ -203,13 +213,14 @@ else:
 
         st.markdown(f"<div style='text-align: center; margin-bottom: 20px;'><b>{user.company_name}</b><br><span style='font-size:0.8em; color:gray;'>{user.full_name}</span></div>", unsafe_allow_html=True)
         
-        # MENÜ SEÇENEKLERİ
+        # MENÜ SEÇENEKLERİ (GÜNCELLENDİ)
         menu_options = {
             "📊 Genel Bakış": dashboard,
             "🌍 Canlı İzleme": map,
+            "🤖 SolidAI Asistan": solid_ai,   # İkon Eklendi & Yeni Sayfa
+            "🧠 AI Veri Analizi": ai_analysis, # İsim Güncellendi (Eski Teknik Analiz)
             "📈 Raporlar": reports,
             "🚜 Cihaz Listesi": inventory,
-            "🔍 Teknik Analiz": analysis,
             "🔔 Alarm Merkezi": alarms,
             "🚧 Şantiye Yönetimi": geofence,
             "⚙️ Ayarlar": settings
@@ -219,7 +230,11 @@ else:
         if "menu_selection" in st.session_state:
             try:
                 target_menu = st.session_state["menu_selection"]
-                default_index = list(menu_options.keys()).index(target_menu)
+                # Eğer eski session'da kalmış eski bir menü ismi varsa (örn: "Teknik Analiz"), hata vermemesi için kontrol
+                if target_menu in menu_options:
+                    default_index = list(menu_options.keys()).index(target_menu)
+                else:
+                    default_index = 0
             except ValueError:
                 default_index = 0
         
@@ -228,6 +243,7 @@ else:
         
         if selected_menu != st.session_state.get("menu_selection"):
              st.session_state["menu_selection"] = selected_menu
+             st.rerun()
 
         st.markdown("---")
         if st.button("Çıkış Yap", use_container_width=True): 
