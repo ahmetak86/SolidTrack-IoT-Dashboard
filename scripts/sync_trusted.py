@@ -14,7 +14,7 @@ from backend.models import User, Device, TelemetryLog
 # --- AYARLAR ---
 API_BASE_URL = "https://api.trusted.dk/api"
 API_USERNAME = "s.ozsarac@hkm.com.tr"  
-API_PASSWORD = "Solid_2023" # <--- ŞİFRENİ BURAYA YAZMAYI UNUTMA
+API_PASSWORD = "Solid_2023"
 GROUP_ID = 7153 
 DEFAULT_LOCAL_PASSWORD = "123456" 
 
@@ -42,6 +42,21 @@ class TrustedClient:
             print(f"❌ Bağlantı Hatası: {e}")
             return False
 
+    def get_latest_sensor_data(self, serial_no):
+        """
+        Cihazın son sensör verilerini (Pil, Isı) çeker.
+        """
+        try:
+            url = f"{API_BASE_URL}/SensorData/GetLatest?serialNumber={serial_no}&count=1"
+            resp = self.session.get(url)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data and isinstance(data, list) and len(data) > 0:
+                    return data[0] # En son paketi dön
+        except Exception as e:
+            print(f"   ⚠️ Sensör hatası ({serial_no}): {e}")
+        return {}
+
     def sync_users(self):
         print("\n👤 Kullanıcı Senkronizasyonu...")
         url = f"{API_BASE_URL}/User?userGroupid={GROUP_ID}"
@@ -66,13 +81,8 @@ class TrustedClient:
         self.db.commit()
 
     def determine_profile_and_icon(self, unit_name):
-        """
-        İsme göre İKON (Dosya adı) ve PROFİL belirler.
-        Excel Listesi ve PDF'teki dosya isimleri baz alınmıştır.
-        """
         name_lower = str(unit_name).lower().replace('İ', 'i').replace('ı', 'i')
         
-        # --- HKM Kırıcı Modelleri (Tam Liste) ---
         breaker_models = [
             "kırıcı", "kirici", "breaker",
             "r50", "r100", "r150", "r200", "r250", "r260", "r300", "r350", "r550", "r750",
@@ -83,34 +93,21 @@ class TrustedClient:
             "g120", "g130", "g160", "g170", "g190", "g210", "g230", "g270", "g280"
         ]
         
-        # --- İKON EŞLEŞTİRME (Dosya adlarıyla aynı olmalı) ---
-        
-        # 1. KIRICI GRUBU
         if any(model in name_lower for model in breaker_models):
-            # Dosya adı: breaker.png
             return "breaker", "PROF_BREAKER"
-        
-        # 2. EKSKAVATÖR GRUBU
         elif "eks" in name_lower or "exc" in name_lower:
-            # Dosya adı: excavator.png
             return "excavator", "PROF_EXCAVATOR"
-            
-        # 3. KAMYON / NAKLİYE GRUBU
         elif "kamyon" in name_lower or "truck" in name_lower:
-            # Dosya adı: truck.png
             return "truck", "PROF_TRANSPORT"
-            
-        # 4. MİKSER GRUBU
         elif "mikser" in name_lower or "mix" in name_lower:
-            # PDF'te görünen dosya adı: mixer.png (concrete_mixer değil)
             return "mixer", "PROF_TRANSPORT"
-        
-        # 5. DİĞERLERİ (Varsayılan)
         else:
             return "truck", "PROF_TRANSPORT"
 
     def sync_fleet_and_sensors(self):
-        print("\n🚜 Filo Senkronizasyonu (V3 - İkon Düzeltme)...")
+        print("\n🚜 Filo ve Sensör (Pil) Senkronizasyonu...")
+        
+        # 1. Konumları Çek
         url = f"{API_BASE_URL}/Units/GroupCurrentPosition?groupid={GROUP_ID}"
         resp = self.session.get(url)
         if resp.status_code != 200: return
@@ -127,14 +124,19 @@ class TrustedClient:
             serial_no = unit_info.get("SerialNumber")
             
             if not serial_no: continue
-            
             serial_no = str(serial_no)
             unit_name = unit_info.get("UnitName", f"Cihaz-{serial_no}")
             
-            # Profil ve İkon Seçimi
-            icon, profile_id = self.determine_profile_and_icon(unit_name)
+            # 2. Sensör Verisini Çek (PİL BURADA!)
+            # Her cihaz için API'ye soruyoruz: "Pili kaç?"
+            sensor_data = self.get_latest_sensor_data(serial_no)
             
-            # Adres
+            # Pil ve Isı verisini al (Yoksa 0)
+            battery_val = sensor_data.get("BatteryPercent", 0)
+            temp_val = sensor_data.get("Temperature", 0)
+            
+            # --- CİHAZ KAYDI ---
+            icon, profile_id = self.determine_profile_and_icon(unit_name)
             address = "Konum Yok"
             if pos_info and pos_info.get("Latitude"):
                 address = f"{pos_info.get('Latitude')}, {pos_info.get('Longitude')}"
@@ -142,7 +144,7 @@ class TrustedClient:
             device = self.db.query(Device).filter(Device.device_id == serial_no).first()
             
             if not device:
-                print(f"   -> Yeni Cihaz: {unit_name} | İkon: {icon}.png")
+                print(f"   -> Yeni: {unit_name} (Pil: %{battery_val})")
                 device = Device(
                     device_id=serial_no,
                     owner_id=API_USERNAME, 
@@ -156,29 +158,34 @@ class TrustedClient:
                 self.db.add(device)
                 added_devices += 1
             else:
-                # İkon veya Profil değişmişse güncelle
-                if device.icon_type != icon or device.profile_id != profile_id:
-                     print(f"   -> GÜNCELLENDİ: {unit_name} | İkon: {device.icon_type}->{icon} | Profil: {device.profile_id}->{profile_id}")
-                     updated_devices += 1
-                
                 device.unit_name = unit_name
                 device.address = address
                 device.icon_type = icon
                 device.profile_id = profile_id 
                 device.is_active = True
+                updated_devices += 1
 
-            # Basit Log
+            # --- LOG KAYDI (Telemetri) ---
             if pos_info and pos_info.get("Latitude"):
                 ts_str = pos_info.get("Timestamp")
                 try: ts = datetime.fromisoformat(ts_str) if ts_str else datetime.utcnow()
                 except: ts = datetime.utcnow()
 
                 log_id = f"LOG_{serial_no}_{int(ts.timestamp())}"
+                
+                # Eğer bu log daha önce kaydedilmemişse kaydet
                 if not self.db.query(TelemetryLog).filter(TelemetryLog.log_id == log_id).first():
                     self.db.add(TelemetryLog(
-                        log_id=log_id, device_id=serial_no, timestamp=ts,
-                        latitude=pos_info.get("Latitude"), longitude=pos_info.get("Longitude"),
-                        speed_kmh=pos_info.get("Speed", 0), battery_pct=0, temp_c=0
+                        log_id=log_id, 
+                        device_id=serial_no, 
+                        timestamp=ts,
+                        latitude=pos_info.get("Latitude"), 
+                        longitude=pos_info.get("Longitude"),
+                        speed_kmh=pos_info.get("Speed", 0), 
+                        
+                        # İŞTE BURASI: Gerçek Pil Verisini Yazıyoruz!
+                        battery_pct=battery_val, 
+                        temp_c=temp_val
                     ))
         
         self.db.commit()

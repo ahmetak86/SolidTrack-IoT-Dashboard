@@ -8,7 +8,7 @@ import pandas as pd
 import math
 from backend.database import get_user_devices, get_device_telemetry, get_all_devices_for_admin
 
-# --- YARDIMCI FONKSİYONLAR ---
+# --- YARDIMCI FONKSİYONLAR (AYNEN KORUNDU) ---
 
 def calculate_distance_km(lat1, lon1, lat2, lon2):
     """İki koordinat arası mesafeyi KM olarak döner (Haversine)"""
@@ -62,6 +62,13 @@ def get_display_name(type_code):
     return TYPE_DISPLAY_MAP.get(code, code.replace("_", " ").title())
 
 def load_view(user):
+    # --- 1. CSS İLE LEAFLET YAZISINI GİZLE ---
+    st.markdown("""
+        <style>
+            .leaflet-control-attribution { display: none !important; }
+        </style>
+    """, unsafe_allow_html=True)
+
     st.markdown("### 🌍 Canlı Saha Operasyonu")
     
     # --- SESSION STATE YÖNETİMİ ---
@@ -72,14 +79,13 @@ def load_view(user):
     if "map_prev_period" not in st.session_state:
         st.session_state.map_prev_period = None
 
-    # URL Parametre Kontrolü (Popup butonundan gelen istekler için)
+    # URL Parametre Kontrolü
     query_params = st.query_params
     target_device_serial = query_params.get("target_device", None)
 
-    # Eğer URL'den yeni bir cihaz geldiyse onu seçili yap
     if target_device_serial and target_device_serial != st.session_state.map_selected_device_id:
         st.session_state.map_selected_device_id = target_device_serial
-        st.session_state.map_route_data = None # Cihaz değişti, eski rotayı sil
+        st.session_state.map_route_data = None 
 
     all_devices = get_all_devices_for_admin() if user.role == 'Admin' else get_user_devices(user.id)
     if not all_devices:
@@ -99,7 +105,6 @@ def load_view(user):
     
     device_names = [d.unit_name for d in devices_by_type]
     
-    # Varsayılan Seçim
     default_selection = []
     if st.session_state.map_selected_device_id:
         found = next((d for d in all_devices if str(d.device_id) == str(st.session_state.map_selected_device_id)), None)
@@ -128,7 +133,6 @@ def load_view(user):
     if is_single_device:
         target_device = final_devices[0]
         
-        # Cihaz değişimi kontrolü
         if str(target_device.device_id) != str(st.session_state.map_selected_device_id):
             st.session_state.map_selected_device_id = str(target_device.device_id)
             st.session_state.map_route_data = None 
@@ -140,7 +144,6 @@ def load_view(user):
         with col_p:
             period = st.selectbox("Periyot:", ["Tarih Seç", "Bugün", "Son 1 Hafta", "Son 1 Ay", "Tüm Zamanlar"], index=0)
         
-        # --- INPUT KİLİTLEME MANTIĞI ---
         is_manual_mode = (period == "Tarih Seç")
         
         today = datetime.now().date()
@@ -153,9 +156,8 @@ def load_view(user):
         with col_b:
             st.write("") 
             st.write("") 
-            manual_btn = st.button("Rotayı Çiz", type="primary", disabled=not is_manual_mode)
+            manual_btn = st.button("Operasyonu Gör", type="primary", disabled=not is_manual_mode)
 
-        # --- VERİ ÇEKME MANTIĞI ---
         should_fetch = False
         s, e = today, today
 
@@ -164,7 +166,6 @@ def load_view(user):
                 s, e = d_start, d_end
                 should_fetch = True
         else:
-            # Otomatik modda period değişince veya veri yoksa çek
             if period != st.session_state.map_prev_period or st.session_state.map_route_data is None:
                 should_fetch = True
             
@@ -204,10 +205,31 @@ def load_view(user):
              start_coords = [l[0].latitude, l[0].longitude]
              default_zoom = 12
 
-    m = folium.Map(location=start_coords, zoom_start=default_zoom, tiles="CartoDB positron")
+    # --- GOOGLE MAPS ENTEGRASYONU BURADA BAŞLIYOR ---
+    # tiles=None ile boş başlatıyoruz
+    m = folium.Map(location=start_coords, zoom_start=default_zoom, tiles=None)
+
+    # hl=en yaparak Kiril alfabesinden kurtuluyoruz. 
+    # Türkiye'deki isimler Latin alfabesi olduğu için doğal görünecektir.
+    folium.TileLayer(
+        tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}&hl=en',
+        attr='Google Maps',
+        name='Google Uydu (Hibrit)',
+        overlay=False,
+        control=True
+    ).add_to(m)
+
+    folium.TileLayer(
+        tiles='https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}&hl=en',
+        attr='Google Maps',
+        name='Google Sokak',
+        overlay=False,
+        control=True
+    ).add_to(m)
+
     Fullscreen().add_to(m)
 
-    # --- ROTA ÇİZİMİ ---
+    # --- ROTA ÇİZİMİ (ANTPATH - AYNEN KORUNDU) ---
     if is_single_device and history_logs:
         pts = [[l.latitude, l.longitude] for l in history_logs]
         if len(pts) > 1:
@@ -236,7 +258,7 @@ def load_view(user):
     map_layer = cluster if enable_cluster else m
     if enable_cluster: cluster.add_to(m)
 
-    # --- PİNLER (BUTONLU POPUP GERİ GELDİ) ---
+    # --- PİNLER ---
     for d in final_devices:
         logs = get_device_telemetry(d.device_id, limit=1)
         if logs:
@@ -244,10 +266,10 @@ def load_view(user):
             c_icon = get_icon_path(d.icon_type)
             icon_obj = folium.CustomIcon(icon_image=c_icon, icon_size=(64, 86), icon_anchor=(32, 86), popup_anchor=(0, -80)) if c_icon else folium.Icon(color="blue", icon="wrench", prefix="fa")
             
-            # --- POPUP ---
-            # Butonu geri getirdik. 
-            # target="_self" diyerek sayfayı yeniliyoruz. 
-            # ?target_device=ID parametresi ile Streamlit'e sinyal gönderiyoruz.
+            safe_speed = int(l.speed_kmh or 0)
+            safe_bat = int(l.battery_pct) if l.battery_pct is not None else '--'
+
+            # Popup HTML
             popup_html = f"""
             <div style="font-family: sans-serif; width: 240px; color:#333;">
                 <b style="font-size:14px">{d.unit_name}</b><br>
@@ -258,12 +280,12 @@ def load_view(user):
                     ⏱️ <b>Son Çalışma:</b> -- dk<br>
                     ∑ <b>Top. Çalışma:</b> -- Saat<br>
                     📍 <b>Konum:</b> {l.latitude:.5f}, {l.longitude:.5f}<br>
-                    🔋 <b>Pil:</b> %--
+                    🔋 <b>Pil:</b> %{safe_bat}
                 </div>
                 <div style="text-align: center; margin-top: 10px;">
                     <a href="/?target_device={d.device_id}" target="_self" 
                        style="background-color: #225d97; color: white; text-decoration: none; padding: 8px 15px; border-radius: 4px; font-size: 13px; font-weight: bold; display: inline-block;">
-                       🔍 Detay Görmek için Tıklayın
+                        🔍 Detay Görmek için Tıklayın
                     </a>
                 </div>
             </div>
@@ -289,15 +311,23 @@ def load_view(user):
          if all_lats:
              m.fit_bounds([[min(all_lats), min(all_lons)], [max(all_lats), max(all_lons)]], padding=(50, 50))
 
+    # --- KATMAN KONTROLÜ (Sağ üstteki buton) ---
+    folium.LayerControl().add_to(m)
+
     # --- HARİTA ÇIKTISI ---
-    # last_object_clicked olayını kaldırdık çünkü pin tıklamasını popup'a bıraktık.
     st_folium(m, height=550, use_container_width=True)
 
-    # --- ÖZET VE TABLO ---
+    # --- ÖZET VE TABLO (AYNEN KORUNDU) ---
     if is_single_device and history_logs:
-        
-        # 1. Veri Hazırlığı
-        df_raw = pd.DataFrame([{'ts': l.timestamp, 'lat': l.latitude, 'lon': l.longitude, 'bat': 0} for l in history_logs])
+        df_raw = pd.DataFrame([
+            {
+                'ts': l.timestamp, 
+                'lat': l.latitude, 
+                'lon': l.longitude, 
+                'bat': l.battery_pct
+            } 
+            for l in history_logs if l.latitude is not None
+        ])
         
         if not df_raw.empty:
             df_raw['date'] = df_raw['ts'].dt.date
@@ -306,38 +336,35 @@ def load_view(user):
             
             for day, group in df_raw.groupby('date'):
                 group = group.sort_values('ts')
-                
-                # Mesafe
+                signal_count = len(group)
                 day_dist_km = 0.0
                 coords = list(zip(group['lat'], group['lon']))
                 if len(coords) > 1:
                     for i in range(len(coords)-1):
                         day_dist_km += calculate_distance_km(coords[i][0], coords[i][1], coords[i+1][0], coords[i+1][1])
                 
-                # Süre
                 start_t = group.iloc[0]['ts']
                 end_t = group.iloc[-1]['ts']
                 duration_hours = (end_t - start_t).total_seconds() / 3600.0
                 cumulative_hours += duration_hours
                 
                 last_rec = group.iloc[-1]
-                
+                safe_bat_val = int(last_rec['bat'] or 0)
+
                 daily_stats.append({
-                    "Tarih / Saat": day.strftime('%d.%m.%Y'),
+                    "Tarih": day.strftime('%d.%m.%Y'),
+                    "Veri Adedi": signal_count,
                     "Günlük Çalışma": format_duration(duration_hours),
-                    "Toplam Çalışma (Kümülatif)": format_duration(cumulative_hours),
-                    "Pil Seviyesi": f"%{last_rec['bat']}",
+                    "Toplam Çalışma": format_duration(cumulative_hours),
+                    "Pil Seviyesi": f"%{safe_bat_val}",
                     "Değiştirilen Yer (m)": f"{int(day_dist_km * 1000)}", 
                     "Konum (Enlem)": f"{last_rec['lat']:.5f}",
                     "Konum (Boylam)": f"{last_rec['lon']:.5f}",
                     "_sort_date": day 
                 })
             
-            # 2. Özet Mesajı
-            dummy_time_str = "XX saat YY dakika" 
-            st.success(f"✅ **{target_device.unit_name}** Seçilen tarihlerde toplam **{dummy_time_str}** çalışmıştır.")
+            st.success(f"✅ **{target_device.unit_name}** analiz edildi.")
 
-            # 3. Tablo (Yeniden Eskiye)
             df_final = pd.DataFrame(daily_stats)
             if not df_final.empty:
                 df_final = df_final.sort_values(by="_sort_date", ascending=False).drop(columns=["_sort_date"])

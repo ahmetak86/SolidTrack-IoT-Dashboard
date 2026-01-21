@@ -9,7 +9,7 @@ from streamlit_folium import st_folium
 # Backend modüllerini bulabilmesi için bir üst dizini yola ekliyoruz
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-# --- IMPORTLAR (DÜZELTİLDİ: Hepsi 'views' altından çağırıldı) ---
+# --- IMPORTLAR (DÜZELTİLDİ: utilization_view EKLENDİ) ---
 from views import (
     dashboard, 
     map, 
@@ -18,61 +18,68 @@ from views import (
     geofence, 
     settings, 
     reports, 
-    ai_analysis,  # İsmi değişen dosya
-    solid_ai      # Yeni oluşturduğumuz asistan
+    ai_analysis,  
+    solid_ai,
+    utilization_view  # <--- YENİ EKLENDİ
 )
 from backend.database import login_user, get_active_share_link, get_device_telemetry, get_last_operation_stats
 
 # --- SAYFA AYARI ---
 st.set_page_config(page_title="SolidTrack IoT", page_icon="🚜", layout="wide")
 
-# --- CSS (MENÜ VE GENEL GÖRÜNÜM) ---
+# --- CSS (TEPE BOŞLUĞU VE SİDEBAR KESİN ÇÖZÜM) ---
 st.markdown("""
     <style>
-    .main {background-color: #F8F9FA;}
-    div[data-testid="stExpander"] {background-color: #FFFFFF; border-radius: 10px; border: 1px solid #E0E0E0;}
-    
-    /* --- SIDEBAR MENÜ TASARIMI --- */
-    
-    /* 1. Radio Butonlarının Yuvarlaklarını (Dairelerini) Gizle */
-    div[role="radiogroup"] > label > div:first-child {
-        display: none !important;
+    /* 1. Tüm sayfa konteynerini hedef al ve üst boşluğu (padding) sıfırla */
+    .block-container {
+        padding-top: 1rem !important;
+        padding-bottom: 0rem !important;
     }
-    
-    /* 2. Menü Elemanlarını Buton Gibi Yap */
+
+    /* 2. Streamlit'in en üstteki görünmez Header (başlık) alanını tamamen yok et */
+    header {
+        visibility: hidden;
+        height: 0px !important;
+    }
+
+    /* 3. Ana zemin rengi (Aydınlık Mod) */
+    .main { background-color: #F8F9FA; }
+
+    /* 4. Sidebar Genişliği ve Tasarımı */
+    [data-testid="stSidebar"] {
+        min-width: 270px;
+        max-width: 270px;
+        background-color: #FFFFFF;
+        border-right: 1px solid #E0E0E0;
+    }
+
+    /* 5. Menü (Radio Button) Tasarımı */
+    div[role="radiogroup"] > label > div:first-child { display: none !important; }
     div[role="radiogroup"] label {
         padding: 10px 15px !important;
-        margin-bottom: 5px !important;
+        margin-bottom: 4px !important;
         border-radius: 8px !important;
-        border: 1px solid transparent !important;
-        transition: all 0.2s ease;
-        background-color: transparent;
-        color: #31333F;
         cursor: pointer;
         display: block !important;
     }
-
-    /* 3. Hover (Üzerine Gelince) Efekti */
-    div[role="radiogroup"] label:hover {
-        background-color: #f0f2f6 !important;
-        border-color: #d1d5db !important;
-    }
-
-    /* 4. Seçili Olan (Active) Menü Tasarımı */
+    div[role="radiogroup"] label:hover { background-color: #f0f2f6 !important; }
     div[role="radiogroup"] label[data-checked="true"] {
-        background-color: #E8F0FE !important; /* Açık mavi zemin */
-        color: #1976D2 !important; /* Mavi yazı */
+        background-color: #E8F0FE !important;
+        color: #1976D2 !important;
         font-weight: bold !important;
-        border-left: 5px solid #1976D2 !important; /* Soluna mavi çizgi */
+        border-left: 5px solid #1976D2 !important;
     }
-    
-    /* Logo Ortala */
+
+    /* 6. Logo Hizalama (Boşlukları temizlenmiş) */
     [data-testid="stSidebar"] img {
         display: block;
-        margin-left: auto;
-        margin-right: auto;
-        margin-bottom: 20px;
+        margin: 0 auto 15px auto;
         object-fit: contain;
+    }
+    
+    /* Sidebar altındaki şirket ismini ortala */
+    [data-testid="stSidebar"] .stMarkdown {
+        text-align: center;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -213,12 +220,13 @@ else:
 
         st.markdown(f"<div style='text-align: center; margin-bottom: 20px;'><b>{user.company_name}</b><br><span style='font-size:0.8em; color:gray;'>{user.full_name}</span></div>", unsafe_allow_html=True)
         
-        # MENÜ SEÇENEKLERİ (GÜNCELLENDİ)
+        # MENÜ SEÇENEKLERİ (GÜNCELLENDİ: utilization_view EKLENDİ)
         menu_options = {
             "📊 Genel Bakış": dashboard,
             "🌍 Canlı İzleme": map,
-            "🤖 SolidAI Asistan": solid_ai,   # İkon Eklendi & Yeni Sayfa
-            "🧠 AI Veri Analizi": ai_analysis, # İsim Güncellendi (Eski Teknik Analiz)
+            "🔨 Kırıcı Verimliliği": utilization_view, # <--- YENİ MENÜ ÖĞESİ
+            "🤖 SolidAI Asistan": solid_ai,   
+            "🧠 AI Veri Analizi": ai_analysis, 
             "📈 Raporlar": reports,
             "🚜 Cihaz Listesi": inventory,
             "🔔 Alarm Merkezi": alarms,
@@ -230,7 +238,6 @@ else:
         if "menu_selection" in st.session_state:
             try:
                 target_menu = st.session_state["menu_selection"]
-                # Eğer eski session'da kalmış eski bir menü ismi varsa (örn: "Teknik Analiz"), hata vermemesi için kontrol
                 if target_menu in menu_options:
                     default_index = list(menu_options.keys()).index(target_menu)
                 else:

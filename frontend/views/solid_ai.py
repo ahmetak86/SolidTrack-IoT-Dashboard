@@ -3,7 +3,7 @@ import google.generativeai as genai
 import os
 
 # --- AYARLAR ---
-GEMINI_API_KEY = "AIzaSyAYuLs3D4rwMW3CxAdSI-QvuInjVHfJay0" 
+GEMINI_API_KEY = "AIzaSyBhhTMXAEamKC2mLtCSgvcd-F4895N4QmY" 
 
 # Bilgi Bankasını İçe Aktar (Eğer varsa)
 try:
