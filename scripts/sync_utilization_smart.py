@@ -7,6 +7,7 @@ import time
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+# Import ayarları
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from backend.models import Device, UtilizationEvent
 from backend.database import SessionLocal
@@ -16,18 +17,42 @@ API_BASE_URL = "https://api.trusted.dk/api"
 API_USERNAME = "s.ozsarac@hkm.com.tr"
 API_PASSWORD = "Solid_2023"
 
-# Başlangıç Tarihi (Verilerin başladığı yıl)
-START_YEAR = 2024
-START_MONTH = 1
+# --- SINIFLANDIRMA FONKSİYONU ---
+def classify_event(duration, activity_val):
+    """
+    API'den gelen Activity (0/1) ve Süre (sn) bilgisine göre
+    kategori, renk ve veritabanı statüsünü belirler.
+    """
+    # DURUM 1: Activity = 0 (Boşta / Idle)
+    # API, activity'i bazen "false", bazen 0 olarak dönebilir.
+    is_active = str(activity_val).lower() in ['true', '1']
+    
+    if not is_active:
+        return {
+            "cat": "Boşta Bekleme (Idle)",
+            "color": "#E0E0E0", # Çok açık gri (Görünmez gibi)
+            "is_burst": False,
+            "raw": 0
+        }
 
-# RENK HARİTASI
-COLOR_MAP = {
-    "breaker tool good": "#00ff00",       # YEŞİL
-    "breaker tool in danger": "#ffae00",  # TURUNCU
-    "mushrooming (41-60)": "#ff0000",     # KIRMIZI
-    "mushrooming, training": "#9900ff",   # MOR
-    "Transport": "#000000"                # SİYAH
-}
+    # DURUM 2: Activity = 1 (Vuruş / Çalışma)
+    # Şimdi süreye göre alt kırılımlara ayıralım:
+    
+    if duration > 180:
+        return {
+            "cat": "Nakliye / Uzun Hareket",
+            "color": "#000000", # SİYAH
+            "is_burst": True,   # Grafikte görünsün istiyoruz
+            "raw": 1
+        }
+    elif duration <= 20:
+        return {"cat": "İdeal Çalışma (0-20s)", "color": "#00C853", "is_burst": True, "raw": 1}
+    elif duration <= 40:
+        return {"cat": "Riskli Çalışma (21-40s)", "color": "#FFAB00", "is_burst": True, "raw": 1}
+    elif duration <= 80:
+        return {"cat": "Uç Şişirme Riski (41-80s)", "color": "#D50000", "is_burst": True, "raw": 1}
+    else: # 81 - 180 arası
+        return {"cat": "Operatör Hatası (81-180s)", "color": "#AA00FF", "is_burst": True, "raw": 1}
 
 class UtilizationSyncSmart:
     def __init__(self):
@@ -45,133 +70,115 @@ class UtilizationSyncSmart:
                 self.session.headers.update({'Authorization': f'Bearer {self.token}'})
                 print("✅ Token alındı.")
                 return True
+            else:
+                print(f"❌ Giriş Hatası: {resp.text}")
+                return False
         except Exception as e:
-            print(f"❌ Giriş Hatası: {e}")
+            print(f"💥 Bağlantı Hatası: {e}")
             return False
 
     def sync_device_daily(self, device):
-        print(f"\n🔨 {device.unit_name} ({device.device_id}) için Hassas Tarama (Günlük)...")
+        print(f"\n🔨 {device.unit_name} ({device.device_id}) senkronize ediliyor...")
         
-        # Başlangıç: 1 Ocak 2024
-        current_date = datetime(START_YEAR, START_MONTH, 1)
-        # Bitiş: Bugün (Şimdi)
-        end_date_limit = datetime.utcnow()
+        # Son 15 günü çekelim (Güvenlik marjı)
+        # İstersen burayı "Son senkronizasyon tarihinden itibaren" diye değiştirebiliriz
+        end_date = datetime.utcnow()
+        start_date = end_date - timedelta(days=15)
         
-        total_added_device = 0
+        # URL: Trusted API PDF'indeki parametreler
+        url = f"{API_BASE_URL}/Utilization/GetUnit"
+        params = {
+            "SerialNumber": device.device_id,
+            "AfterDate": start_date.strftime("%Y-%m-%dT%H:%M:%S"),
+            "BeforeDate": end_date.strftime("%Y-%m-%dT%H:%M:%S"),
+            "Count": 10000,
+            "SortDescending": "false",
+            "SeparateByDay": "false", # Tek parça gelsin
+            "ActivityFilter": "All"   # Hepsini (0 ve 1) getir!
+        }
         
-        # GÜNLÜK DÖNGÜ (Limit sorununu çözer)
-        while current_date < end_date_limit:
-            next_date = current_date + timedelta(days=1) # Sadece 1 gün ileri git
+        try:
+            resp = self.session.get(url, params=params)
+            if resp.status_code != 200:
+                print(f"   ⚠️ API Hatası: {resp.status_code}")
+                return
+
+            raw_data = resp.json()
+            data_list = []
             
-            s_str = current_date.strftime("%Y-%m-%dT%H:%M:%S")
-            e_str = next_date.strftime("%Y-%m-%dT%H:%M:%S")
-            
-            # API İsteği (1 Günlük Veri)
-            url = f"{API_BASE_URL}/Utilization/GetUnit"
-            params = {
-                "SerialNumber": device.device_id,
-                "AfterDate": s_str,
-                "BeforeDate": e_str,
-                "Count": 10000 # Bir günde 10.000 kayıt olması imkansıza yakın
-            }
-            
-            try:
-                resp = self.session.get(url, params=params)
-                if resp.status_code == 200:
-                    raw_data = resp.json()
-                    data_list = []
-                    
-                    if isinstance(raw_data, dict):
-                        if "Activities" in raw_data: data_list = raw_data["Activities"]
-                        else:
-                            for key in ["Items", "List", "Data", "Result"]:
-                                if key in raw_data: data_list = raw_data[key]; break
-                    elif isinstance(raw_data, list):
-                        data_list = raw_data
-                    
-                    if data_list:
-                        added_count = self.process_data_list(device, data_list)
-                        total_added_device += added_count
-                        # Sadece veri varsa ekrana bas, kalabalık yapmasın
-                        if added_count > 0:
-                            print(f"   📅 {current_date.date()}: {len(data_list)} olay bulundu -> {added_count} yeni eklendi.")
+            # API Yapısını Çözme
+            if isinstance(raw_data, dict):
+                if "Activities" in raw_data: data_list = raw_data["Activities"]
+                elif "List" in raw_data: data_list = raw_data["List"]
+            elif isinstance(raw_data, list):
+                data_list = raw_data
                 
-                # API Limit aşımını önlemek için çok kısa bekleme
-                # time.sleep(0.05) 
+            if not data_list:
+                print("   -> Veri yok.")
+                return
 
-            except Exception as e:
-                print(f" ❌ Hata ({current_date.date()}): {e}")
+            self.process_data_list(device, data_list)
 
-            # Bir sonraki güne geç
-            current_date = next_date
-
-        print(f"   🏁 {device.unit_name} için toplam {total_added_device} yeni kayıt eklendi.")
+        except Exception as e:
+            print(f"   ❌ Kritik Hata: {e}")
 
     def process_data_list(self, device, data_list):
-        count = 0
-        # Toplu Ekleme (Bulk Insert) için liste
-        logs_to_add = []
+        count_new = 0
         
         for item in data_list:
-            start_str = item.get("ActivityStart") or item.get("UsageStartUTC") or item.get("Start")
-            duration = item.get("Duration") or item.get("UsageDurationSeconds") or item.get("DurationSeconds") or 0
-            cat_name = item.get("Category") or item.get("ActivityType") or item.get("Name") or "Unknown"
-            is_burst = item.get("IsBurst", True)
+            # 1. Temel Verileri Al
+            start_str = item.get("ActivityStart")
+            duration = item.get("Duration", 0)
+            
+            # API'den gelen "Activity" (0 veya 1)
+            # Eğer Activity alanı yoksa, eski mantıkla 'True' varsaymayalım, 'False' varsayalım.
+            activity_val = item.get("Activity", 0) 
 
             if not start_str: continue
             
-            # Tarih formatı temizliği
-            start_str = str(start_str).split('.')[0]
+            # Tarihi Parse Et
             try:
-                start_ts = datetime.fromisoformat(start_str)
+                start_ts = datetime.fromisoformat(str(start_str).split('.')[0])
             except:
                 continue
 
-            # Basit kontrol: Eğer duration 0 ise ve kategori "Transport" değilse kaydetme (Gürültü verisi olabilir)
-            # if duration == 0 and "Transport" not in cat_name: continue
-
-            # Hız için DB sorgusunu atlıyoruz, try-except ile unique constraint'e güveneceğiz 
-            # ya da burada basitçe ekliyoruz. (Unique constraint varsa patlar, yoksa çift ekler)
-            # En temiz yöntem: Önce ekle, sonra commit ederken hata vereni atla (fakat yavaş olur).
-            # Şimdilik DB'de 'exists' kontrolünü yapalım ama hızlı olsun.
+            # 2. Sınıflandırma Yap (Altın Kural)
+            # Veriyi analiz et, etiketini yapıştır
+            info = classify_event(duration, activity_val)
             
-            # Renk
-            color = "#808080"
-            for key, val in COLOR_MAP.items():
-                if key.lower() in str(cat_name).lower(): color = val; break
-
-            # Python tarafında kontrol (Performans için DB'ye her satırda gitmek yerine)
-            # Not: En sağlamı DB'ye sormaktır, şimdilik böyle devam edelim.
-            exists = self.db.query(UtilizationEvent.id).filter(
+            # 3. Veritabanında Var mı?
+            exists = self.db.query(UtilizationEvent).filter(
                 UtilizationEvent.device_id == device.device_id,
                 UtilizationEvent.start_time == start_ts
             ).first()
 
             if not exists:
                 end_ts = start_ts + timedelta(seconds=duration)
+                
                 log = UtilizationEvent(
                     device_id=device.device_id,
                     start_time=start_ts,
                     end_time=end_ts,
                     duration_sec=duration,
-                    category=str(cat_name),
-                    color_code=color,
-                    is_burst=is_burst
+                    category=info["cat"],
+                    color_code=info["color"],
+                    is_burst=info["is_burst"], # True/False
+                    raw_activity=info["raw"]   # 0/1
                 )
                 self.db.add(log)
-                count += 1
+                count_new += 1
         
-        if count > 0:
-            try:
-                self.db.commit()
-            except Exception as e:
-                self.db.rollback()
-                print(f"   ⚠️ Kayıt hatası (Muhtemelen çift kayıt): {e}")
-        
-        return count
+        try:
+            self.db.commit()
+            if count_new > 0:
+                print(f"   ✅ {count_new} yeni kayıt eklendi (Activity 0 ve 1 dahil).")
+        except Exception as e:
+            self.db.rollback()
+            print(f"   ⚠️ DB Kayıt Hatası: {e}")
 
     def run(self):
         devices = self.db.query(Device).filter(Device.is_active == True).all()
+        print(f"Toplam {len(devices)} aktif cihaz için tarama başlıyor...")
         for dev in devices:
             self.sync_device_daily(dev)
         self.db.close()
