@@ -8,7 +8,7 @@ from geopy.geocoders import Nominatim
 from backend.database import (
     create_geosite, get_user_geosites, delete_geosite, update_geosite, 
     get_user_devices, update_geosite_devices,
-    SessionLocal, GeoSite, update_user_settings
+    SessionLocal, GeoSite, update_user_settings, sync_geosites_from_trusted # <-- YENİ EKLENDİ
 )
 
 # --- YARDIMCI: ADRES BULUCU ---
@@ -80,15 +80,34 @@ def load_view(user):
 # ==========================================
 # 1. LİSTE GÖRÜNÜMÜ (ANA EKRAN)
 # ==========================================
+# frontend/views/geofence.py içindeki render_list_view fonksiyonunu KOMPLE bununla değiştir:
+
 def render_list_view(user):
-    st.title("🚧 Şantiye ve Bölge Yönetimi")
+    # Başlık ve Sync Butonu yanyana
+    c_head, c_sync = st.columns([6, 2])
+    with c_head:
+        st.title("🚧 Şantiye ve Bölge Yönetimi")
+    with c_sync:
+        st.write("") 
+        if st.button("🔄 Senkronize Et", help="Merkezi sistemdeki güncellemeleri kontrol eder."):
+            with st.spinner("Sunucu ile haberleşiliyor..."):
+                success, msg = sync_geosites_from_trusted(user.id)
+            if success:
+                st.toast(f"Senkronizasyon Başarılı: {msg}", icon="✅")
+                time.sleep(1)
+                st.rerun()
+            else:
+                st.error(f"Hata: {msg}")
     
     col_header, col_btn = st.columns([6, 1.5])
     
     # DB'den verileri taze çek
     my_sites = get_user_geosites(user.id)
     all_devices = get_user_devices(user.id)
-    device_options = {d.unit_name: d.device_id for d in all_devices}
+    
+    # Cihaz Listesi DataFrame Hazırlığı (Tüm şantiyeler için ortak veri)
+    # Her cihazın ID'sini ve Adını bir sözlükte tutalım
+    device_map = {d.device_id: d.unit_name for d in all_devices}
 
     with col_btn:
         if st.button("➕ Yeni Şantiye", type="primary", use_container_width=True):
@@ -104,17 +123,6 @@ def render_list_view(user):
 
     if not my_sites:
         st.info("👋 Henüz oluşturulmuş bir şantiye bölgesi bulunmamaktadır.")
-        c1, c2, c3 = st.columns([1, 2, 1])
-        with c2:
-            st.markdown("""
-            <div style="text-align: center; padding: 40px; background-color: #f8f9fa; border-radius: 10px; border: 2px dashed #ccc;">
-                <h3>🗺️ İlk Şantiyenizi Oluşturun</h3>
-                <p>Makinelerinizin çalışma sınırlarını belirlemek ve bölge dışına çıkışlarda alarm almak için bir şantiye tanımlayın.</p>
-            </div>
-            """, unsafe_allow_html=True)
-            if st.button("Şantiye Oluşturmak İçin Tıklayın", type="primary", use_container_width=True):
-                st.session_state.page_mode = 'create'
-                st.rerun()
     else:
         # KART GÖRÜNÜMÜ
         for site in my_sites:
@@ -130,41 +138,78 @@ def render_list_view(user):
                 st.markdown("---")
                 c_devices, c_actions = st.columns([2, 1.5])
                 
-                # --- SOL: CİHAZ ATAMA ---
+                # --- SOL: CİHAZ ATAMA (YENİ CHECKBOX SİSTEMİ) ---
                 with c_devices:
-                    st.markdown("**🚜 Atanmış Cihazlar**")
+                    st.markdown("**🚜 Cihaz Yönetimi**")
                     
-                    # Eğer "Tüm cihazlara uygula" seçiliyse hepsi seçili gelsin
-                    assigned_devs = []
-                    if site.apply_to_all_devices:
-                        assigned_devs = list(device_options.keys())
+                    # 1. Bu şantiyeye atanmış cihazların ID'lerini bul
+                    assigned_ids = [d.device_id for d in site.devices]
                     
-                    selected_devs = st.multiselect(
-                        "Cihazları Düzenle",
-                        options=device_options.keys(),
-                        default=assigned_devs,
-                        key=f"dev_sel_{site.site_id}",
-                        placeholder="Bu şantiyeye cihaz ekle...",
-                        label_visibility="collapsed"
+                    # 2. DataFrame Oluştur (E-Ticaret Filtresi Gibi)
+                    df_data = []
+                    for dev in all_devices:
+                        df_data.append({
+                            "Seç": dev.device_id in assigned_ids, # Varsa True (Tikli)
+                            "Cihaz Adı": dev.unit_name,
+                            "Model": dev.asset_model,
+                            "ID": dev.device_id # Gizli kalacak ama bize lazım
+                        })
+                    
+                    df = pd.DataFrame(df_data)
+                    
+                    # 3. Tabloyu Göster (Editlenebilir)
+                    edited_df = st.data_editor(
+                        df,
+                        column_config={
+                            "Seç": st.column_config.CheckboxColumn(
+                                "Şantiyeye Dahil Et",
+                                help="Bu cihazı şantiyeye eklemek için işaretleyin",
+                                default=False,
+                            ),
+                            "ID": None # ID sütununu gizle
+                        },
+                        disabled=["Cihaz Adı", "Model"], # Sadece checkbox değişsin
+                        hide_index=True,
+                        key=f"editor_{site.site_id}",
+                        height=200 # Scroll edilebilir alan
                     )
                     
-                    if st.button("Cihazları Güncelle", key=f"upd_dev_{site.site_id}"):
-                        st.toast(f"'{site.name}' için cihaz listesi güncellendi!", icon="✅")
+                    # 4. GÜNCELLE BUTONU
+                    if st.button("💾 Seçimi Kaydet ve Güncelle", key=f"btn_save_{site.site_id}", use_container_width=True):
+                        # Seçili olanların ID'lerini al
+                        selected_rows = edited_df[edited_df["Seç"] == True]
+                        new_selected_ids = selected_rows["ID"].tolist()
+                        
+                        # Backend'e gönder
+                        from backend.database import update_geosite_devices # Fonksiyonu import et
+                        with st.spinner("Sunucu ile senkronize ediliyor..."):
+                            update_geosite_devices(site.site_id, new_selected_ids)
+                        
+                        st.toast("Cihaz listesi başarıyla güncellendi!", icon="✅")
+                        time.sleep(1)
+                        st.rerun()
 
                 # --- SAĞ: ALARMLAR ---
                 with c_actions:
                     st.markdown("**⚙️ Aksiyonlar**")
                     
-                    # Tek bir Alarm Switch'i (Veritabanındaki 'auto_enable_alarms' alanını kullanır)
+                    # Alarm Durumu
                     alarm_val = getattr(site, 'auto_enable_alarms', True)
-                    alarm_toggle = st.toggle("🚨 Bölge İhlal Alarmı", value=alarm_val, key=f"al_main_{site.site_id}")
                     
-                    if alarm_toggle != alarm_val:
-                        update_geosite_field(site.site_id, 'auto_enable_alarms', alarm_toggle)
-                        status = "Aktif" if alarm_toggle else "Pasif"
-                        st.toast(f"Alarm Durumu: {status}", icon="🔔")
-                        time.sleep(0.5)
+                    # Alarm Toggle (Artık API'ye bağlı)
+                    new_alarm_val = st.toggle("🚨 Bölge İhlal Alarmı", value=alarm_val, key=f"al_main_{site.site_id}")
+                    
+                    if new_alarm_val != alarm_val:
+                        # YENİ FONKSİYONU ÇAĞIRIYORUZ
+                        from backend.database import toggle_geosite_alarm_status
+                        toggle_geosite_alarm_status(site.site_id, new_alarm_val)
+                        
+                        status = "Aktif" if new_alarm_val else "Pasif"
+                        st.toast(f"Alarm Durumu: {status} (Sunucuya İletildi)", icon="🔔")
+                        time.sleep(1)
                         st.rerun()
+
+                    st.info("Alarm açıldığında, seçili cihazlar bölge dışına çıkarsa uyarı üretilir.")
 
                     st.markdown("---")
                     
@@ -218,6 +263,8 @@ def render_editor_view(user):
         
         if new_lat != curr_lat or new_lon != curr_lon:
             st.session_state.map_center = [new_lat, new_lon]
+            # --- YENİ EKLENEN SATIR: Adresi de güncelle ---
+            st.session_state.form_addr = get_address_from_coords(new_lat, new_lon)
             st.rerun()
 
         # Adres Alanı

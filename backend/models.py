@@ -195,6 +195,7 @@ class GeoSite(Base):
     longitude = Column(Float, nullable=False)
     radius_meters = Column(Integer, default=500)
     trusted_site_id = Column(Integer, nullable=True) # Trusted API'den gelen ID
+    created_at = Column(DateTime, default=datetime.utcnow) # Oluşturulma Tarihi
     
     # --- YENİ EKLENEN ALANLAR (Gelişmiş Ayarlar) ---
     visible_to_subgroups = Column(Boolean, default=False)

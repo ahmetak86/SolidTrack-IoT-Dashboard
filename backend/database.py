@@ -586,3 +586,40 @@ def sync_geosites_from_trusted(user_id):
         return False, str(e)
     finally:
         db.close()
+
+        # backend/database.py dosyasının EN ALTINA ekle:
+
+def toggle_geosite_alarm_status(site_id, is_active):
+    """
+    Şantiyenin alarm durumunu değiştirir ve Sunucuya bildirir.
+    """
+    db = SessionLocal()
+    try:
+        site = db.query(GeoSite).filter(GeoSite.site_id == site_id).first()
+        if not site: return False
+
+        # 1. Yerel DB Güncelle
+        site.auto_enable_alarms = is_active
+        db.commit()
+        
+        print(f"🔔 Alarm Durumu Değişti: {site.name} -> {'Aktif' if is_active else 'Pasif'}")
+
+        # 2. Sunucuya Bildir (Kritik Kısım)
+        if site.trusted_site_id and site.devices:
+            device_ids = [d.device_id for d in site.devices]
+            if device_ids:
+                print(f"📡 Sunucudaki {len(device_ids)} cihazın alarm ayarı güncelleniyor...")
+                # Cihazları "RegisterUnits=True" ama "Alarm" durumu yeni gelen değer (is_active) olacak şekilde güncelle
+                api_update_registrations(
+                    site.trusted_site_id,
+                    device_ids,
+                    register=True,
+                    alarm=is_active
+                )
+        return True
+    except Exception as e:
+        print(f"Alarm Toggle Hatası: {e}")
+        db.rollback()
+        return False
+    finally:
+        db.close()
