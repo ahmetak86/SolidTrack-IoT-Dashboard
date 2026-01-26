@@ -111,3 +111,5 @@ def load_view(user):
             )
         else:
             st.info("Kayıt bulunamadı.")
+    st.markdown('<div style="height: 50px;"></div>', unsafe_allow_html=True)
+    

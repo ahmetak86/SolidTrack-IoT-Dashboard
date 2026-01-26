@@ -1,9 +1,16 @@
 # backend/models.py (V5 - FINAL + YENİ ÖZELLİKLER)
-from sqlalchemy import Column, String, Integer, Float, Boolean, DateTime, ForeignKey, Text
+from sqlalchemy import Column, String, Integer, Float, Boolean, DateTime, ForeignKey, Text, Table
 from sqlalchemy.orm import declarative_base, relationship
 from datetime import datetime
 
 Base = declarative_base()
+
+# Cihazlar ve Şantiyeler Arasındaki Çoka-Çok İlişki
+device_geosite_association = Table(
+    'device_geosite_link', Base.metadata,
+    Column('device_id', String, ForeignKey('devices.device_id'), primary_key=True),
+    Column('site_id', Integer, ForeignKey('geosites.site_id'), primary_key=True)
+)
 
 # ---------------------------------------------------------
 # 1. KULLANIM PROFİLLERİ
@@ -109,6 +116,8 @@ class Device(Base):
     utilization_events = relationship("UtilizationEvent", back_populates="device") # Detaylı Eventler (Düzeltildi)
     
     alarms = relationship("AlarmEvent", back_populates="device")
+    # Şantiyelerle İlişki (Many-to-Many)
+    geosites = relationship("GeoSite", secondary=device_geosite_association, back_populates="devices")
 
 # ---------------------------------------------------------
 # 4. LOGLAR
@@ -185,8 +194,18 @@ class GeoSite(Base):
     latitude = Column(Float, nullable=False)
     longitude = Column(Float, nullable=False)
     radius_meters = Column(Integer, default=500)
+    trusted_site_id = Column(Integer, nullable=True) # Trusted API'den gelen ID
     
+    # --- YENİ EKLENEN ALANLAR (Gelişmiş Ayarlar) ---
+    visible_to_subgroups = Column(Boolean, default=False)
+    apply_to_all_devices = Column(Boolean, default=True)
+    auto_enable_new_devices = Column(Boolean, default=True)
+    auto_enable_alarms = Column(Boolean, default=True)
+    auto_enable_entry_alarms = Column(Boolean, default=False)
+
     owner = relationship("User", back_populates="geosites")
+
+    devices = relationship("Device", secondary=device_geosite_association, back_populates="geosites")
 
 class AlarmEvent(Base):
     __tablename__ = 'alarm_events'

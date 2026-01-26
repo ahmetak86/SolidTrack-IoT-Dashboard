@@ -4,6 +4,7 @@ import uuid # <-- YENİ EKLENDİ (Şifre üretmek için)
 from datetime import datetime, timedelta
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, joinedload
+from backend.trusted_api import api_create_geosite, api_delete_geosite, api_update_registrations, api_get_geosites
 
 # BURASI ÇOK ÖNEMLİ: ShareLink'i buraya ekledik
 from backend.models import Base, User, Device, TelemetryLog, UtilizationLog, ReportSubscription, GeoSite, AlarmEvent, ShareLink
@@ -73,9 +74,23 @@ def update_user_settings(user_id, settings_dict):
 # ---------------------------------------------------------
 # GEOSITE (ŞANTİYE) FONKSİYONLARI
 # ---------------------------------------------------------
+# backend/database.py (GÜNCELLENMİŞ VERSİYON)
+
 def create_geosite(user_id, name, lat, lon, radius, address, adv_settings):
     db = SessionLocal()
     try:
+        # 1. ÖNCE TRUSTED API'YE ŞANTİYEYİ GÖNDER
+        print(f"🌍 Sunucuya şantiye gönderiliyor: {name}")
+        api_res = api_create_geosite(name, lat, lon, radius)
+        
+        trusted_id = None
+        if api_res['success']:
+            trusted_id = api_res['trusted_id']
+            print(f"✅ Uzak sunucuda Şantiye Oluşturuldu. ID: {trusted_id}")
+        else:
+            print(f"⚠️ Uzak sunucuda Oluşturma Hatası: {api_res.get('error')}")
+        
+        # 2. YEREL VERİTABANINA KAYDET
         new_site = GeoSite(
             owner_id=user_id,
             name=name,
@@ -83,6 +98,7 @@ def create_geosite(user_id, name, lat, lon, radius, address, adv_settings):
             longitude=lon,
             radius_meters=radius,
             address=address,
+            trusted_site_id=trusted_id,
             visible_to_subgroups=adv_settings.get('visible_to_subgroups', False),
             apply_to_all_devices=adv_settings.get('apply_to_all_devices', True),
             auto_enable_new_devices=adv_settings.get('auto_enable_new_devices', True),
@@ -91,28 +107,76 @@ def create_geosite(user_id, name, lat, lon, radius, address, adv_settings):
         db.add(new_site)
         db.commit()
         db.refresh(new_site)
+
+        # 3. CİHAZLARI TRUSTED'A GÖNDER (Eğer "Tüm Cihazlar" seçildiyse)
+        if new_site.apply_to_all_devices and trusted_id:
+            # Kullanıcının tüm cihazlarını bul
+            all_devices = db.query(Device).filter(Device.owner_id == user_id).all()
+            if all_devices:
+                device_ids = [d.device_id for d in all_devices]
+                
+                # Yerel ilişkiyi kur
+                new_site.devices = all_devices
+                db.commit()
+                
+                # API'ye gönder
+                print(f"📡 {len(device_ids)} cihaz sunucudaki şantiyeye ekleniyor...")
+                api_update_registrations(
+                    trusted_id, 
+                    device_ids, 
+                    register=True, 
+                    alarm=new_site.auto_enable_alarms
+                )
+
         return new_site
     except Exception as e:
-        print(f"Hata: {e}")
+        print(f"DB Create Hatası: {e}")
         db.rollback()
         return None
     finally:
         db.close()
+
+# backend/database.py içindeki update_geosite fonksiyonunu bununla değiştir:
 
 def update_geosite(site_id, name, lat, lon, radius, address, adv_settings):
     db = SessionLocal()
     try:
         site = db.query(GeoSite).filter(GeoSite.site_id == site_id).first()
         if site:
+            # --- API SENKRONİZASYONU ---
+            # Koordinat veya İsim değiştiyse Trusted tarafında güncelleme yapmamız lazım.
+            # Trusted API'de Lat/Lon update olmadığı için: ESKİYİ SİL -> YENİYİ EKLE
+            
+            if site.trusted_site_id:
+                print(f"🔄 Sunucu Güncelleme: Eski ID {site.trusted_site_id} siliniyor...")
+                api_delete_geosite(site.trusted_site_id)
+            
+            # Yeni ayarlarla tekrar oluştur
+            print(f"🌍 Uzak Sunucu Yeniden Oluşturuluyor: {name}")
+            api_res = api_create_geosite(name, lat, lon, radius)
+            
+            if api_res['success']:
+                site.trusted_site_id = api_res['trusted_id']
+                print(f"✅ Güncelleme Başarılı. Yeni Sunucu ID: {site.trusted_site_id}")
+            else:
+                print(f"⚠️ Güncelleme sırasında API hatası: {api_res.get('error')}")
+                site.trusted_site_id = None # Bağlantı koptu
+
+            # --- YEREL DB GÜNCELLEME ---
             site.name = name
             site.latitude = lat
             site.longitude = lon
             site.radius_meters = radius
             site.address = address
+            
+            # Ayarlar
             site.visible_to_subgroups = adv_settings.get('visible_to_subgroups', False)
             site.apply_to_all_devices = adv_settings.get('apply_to_all_devices', True)
             site.auto_enable_new_devices = adv_settings.get('auto_enable_new_devices', True)
+            
+            # Alarm ayarı değişirse (API'ye yansıtmak gerekir ama şimdilik yerelde tutuyoruz)
             site.auto_enable_alarms = adv_settings.get('auto_enable_alarms', True)
+            site.auto_enable_entry_alarms = adv_settings.get('auto_enable_entry_alarms', False)
             
             db.commit()
             return True
@@ -125,7 +189,8 @@ def update_geosite(site_id, name, lat, lon, radius, address, adv_settings):
 
 def get_user_geosites(user_id):
     db = SessionLocal()
-    sites = db.query(GeoSite).filter(GeoSite.owner_id == user_id).all()
+    # joinedload(GeoSite.devices) sayesinde cihaz listesi her zaman taze gelir!
+    sites = db.query(GeoSite).options(joinedload(GeoSite.devices)).filter(GeoSite.owner_id == user_id).all()
     db.close()
     return sites
 
@@ -134,10 +199,17 @@ def delete_geosite(site_id):
     try:
         site = db.query(GeoSite).filter(GeoSite.site_id == site_id).first()
         if site:
+            # 1. TRUSTED API'DEN SİL
+            if site.trusted_site_id:
+                print(f"🗑️ Sunucu ID {site.trusted_site_id} siliniyor...")
+                api_delete_geosite(site.trusted_site_id)
+            
+            # 2. YEREL DB'DEN SİL
             db.delete(site)
             db.commit()
             return True
-    except:
+    except Exception as e:
+        print(f"Delete Hatası: {e}")
         db.rollback()
     finally:
         db.close()
@@ -383,3 +455,134 @@ def get_last_operation_stats(device_id):
 
     db.close()
     return result
+
+# backend/database.py
+
+def update_geosite_devices(site_id, device_ids_list):
+    """
+    Şantiyeye atanan cihazları günceller ve API ile senkronize eder.
+    Yerel veritabanı güncellemesi GARANTİ altına alındı.
+    """
+    db = SessionLocal()
+    try:
+        site = db.query(GeoSite).filter(GeoSite.site_id == site_id).first()
+        if not site: return False
+
+        # Yerel DB'deki eski cihaz listesini al (API farkı hesaplamak için)
+        old_device_ids = [d.device_id for d in site.devices]
+        
+        set_old = set(old_device_ids)
+        set_new = set(device_ids_list)
+        
+        to_add = list(set_new - set_old)
+        to_remove = list(set_old - set_new)
+        
+        print(f"📊 Cihaz Güncelleme: +{len(to_add)} Eklenecek, -{len(to_remove)} Çıkarılacak")
+
+        # --- API İŞLEMLERİ (Hata olsa bile yerel devam etsin) ---
+        if site.trusted_site_id:
+            # 1. SİLME (RegisterUnits=False)
+            if to_remove:
+                api_update_registrations(site.trusted_site_id, to_remove, register=False, alarm=False)
+
+            # 2. EKLEME (RegisterUnits=True)
+            if to_add:
+                api_update_registrations(site.trusted_site_id, to_add, register=True, alarm=site.auto_enable_alarms)
+
+        # --- YEREL DB GÜNCELLEME (Fix: Önce Temizle Sonra Ekle) ---
+        site.devices = [] 
+        db.commit() # Ara kayıt (İlişkiyi kopar)
+        
+        if device_ids_list:
+            selected_devices = db.query(Device).filter(Device.device_id.in_(device_ids_list)).all()
+            site.devices = selected_devices
+        
+        db.commit() # Son kayıt
+        return True
+
+    except Exception as e:
+        print(f"Cihaz Güncelleme Exception: {e}")
+        db.rollback()
+        return False
+    finally:
+        db.close()
+
+def sync_geosites_from_trusted(user_id):
+    """
+    Sunucu API'den verileri çeker (Radius, Lat, Lon VE CİHAZLAR) ve yerel DB'yi günceller.
+    """
+    db = SessionLocal()
+    try:
+        print("🔄 Sunucudan veri çekiliyor...")
+        # IncludeUnitInfo=true ile çağırıyoruz (trusted_api.py içinde düzelttik)
+        api_res = api_get_geosites()
+        
+        if not api_res['success']:
+            print("❌ Sync Hatası:", api_res.get('error'))
+            return False, "API Hatası"
+
+        trusted_sites = api_res['data'] 
+        updated_count = 0
+        
+        all_user_devices = db.query(Device).filter(Device.owner_id == user_id).all()
+        device_map = {d.device_id: d for d in all_user_devices}
+
+        # joinedload ile yerel cihazları da çek
+        local_sites = db.query(GeoSite).options(joinedload(GeoSite.devices)).filter(GeoSite.owner_id == user_id).all()
+        
+        for l_site in local_sites:
+            if not l_site.trusted_site_id: continue
+            
+            # API listesinde bu ID'yi bul
+            remote_site = next((item for item in trusted_sites if item["Id"] == l_site.trusted_site_id), None)
+            
+            if remote_site:
+                changes = False
+                
+                # 1. TEMEL BİLGİLER
+                if remote_site.get("Radius") and l_site.radius_meters != remote_site["Radius"]:
+                    l_site.radius_meters = remote_site["Radius"]
+                    changes = True
+                
+                if remote_site.get("Latitude") and abs(l_site.latitude - remote_site["Latitude"]) > 0.00001:
+                    l_site.latitude = remote_site["Latitude"]
+                    changes = True
+                    
+                if remote_site.get("Longitude") and abs(l_site.longitude - remote_site["Longitude"]) > 0.00001:
+                    l_site.longitude = remote_site["Longitude"]
+                    changes = True
+                
+                # 2. CİHAZ LİSTESİNİ GÜNCELLE
+                remote_units = remote_site.get("RegisteredUnits", [])
+                remote_device_ids = []
+                
+                if remote_units:
+                    for u in remote_units:
+                        # API yapısına göre SerialNumber'ı al [cite: 107]
+                        sn = u.get("SerialNumber")
+                        if sn: remote_device_ids.append(str(sn))
+                
+                current_local_ids = [d.device_id for d in l_site.devices]
+                
+                # Listeler farklıysa güncelle
+                if set(remote_device_ids) != set(current_local_ids):
+                    print(f"   -> Cihaz Senkronizasyonu: {l_site.name}")
+                    new_device_list = []
+                    for did in remote_device_ids:
+                        if did in device_map:
+                            new_device_list.append(device_map[did])
+                    
+                    l_site.devices = new_device_list
+                    changes = True
+
+                if changes:
+                    updated_count += 1
+                    
+        db.commit()
+        return True, f"{updated_count} şantiye güncellendi."
+        
+    except Exception as e:
+        print(f"Sync Exception: {e}")
+        return False, str(e)
+    finally:
+        db.close()

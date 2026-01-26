@@ -114,11 +114,15 @@ def get_category_label(duration, raw_activity):
     elif duration <= 80: return "Uç Şişirme Riski (41-80s)"
     else: return "Operatör Hatası (81-180s)"
 
-# --- AKSİYON BAR COMPONENTİ (YEŞİL BANT) ---
+# --- AKSİYON BAR COMPONENTİ (SADE & HİZALI VERSİYON) ---
 def render_bottom_action_bar(df, target_device, ratio, total_working_sec, avg_daily_sec, key_suffix=""):
-    """Son SS'deki tasarıma uygun yeşil bantlı component"""
+    """
+    Yeşil bant yok. Sadece hizalı metinler ve renkli butonlar.
+    Sol: SolidAI Metni ve Kırmızı Buton
+    Sağ: İndirme Metni ve Mavi Butonlar
+    """
     
-    # PDF Verisi Hazırlama
+    # --- VERİ HAZIRLIĞI ---
     pdf_rows = []
     if not df.empty:
         daily_grp = df.groupby("Tarih")["Süre (sn)"].sum().reset_index()
@@ -134,99 +138,112 @@ def render_bottom_action_bar(df, target_device, ratio, total_working_sec, avg_da
         "score": f"{ratio:.1f}"
     }
 
-    # Özel HTML Yapısı (Container içinde butonları hizalamak için)
-    st.markdown("""
+    # Bu bloğu izole etmek için bir ID (CSS karışmasın diye)
+    scope_id = f"clean-action-bar-{key_suffix}"
+
+    st.markdown(f"""
     <style>
-    .action-bar-container {
-        background-color: #dbf6e0;
-        padding: 20px 25px;
-        border-radius: 12px;
-        margin-top: 15px;
-        margin-bottom: 15px;
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-    }
-    .action-text-area {
-        display: flex;
-        align-items: center;
-    }
-    .action-icon {
-        font-size: 24px;
-        margin-right: 15px;
-    }
-    .action-title {
-        font-weight: bold;
+    /* Kapsayıcıya biraz üst/alt boşluk verelim */
+    div#{scope_id} {{
+        margin-top: 20px;
+        margin-bottom: 40px;
+    }}
+
+    /* BAŞLIKLAR İÇİN STİL */
+    .clean-title {{
         font-size: 16px;
-        color: #000;
-        margin-bottom: 2px;
-    }
-    .action-desc {
-        font-size: 14px;
-        color: #555;
-    }
+        font-weight: 700;
+        color: #111;
+        margin-bottom: 10px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }}
+
+    /* KIRMIZI BUTON (SolidAI) */
+    /* Sadece bu scope içindeki primary butonları boyar */
+    div[data-testid="stVerticalBlock"]:has(div#{scope_id}) button[kind="primary"] {{
+        background-color: #ff4b4b !important;
+        border: none !important;
+        color: white !important;
+        font-weight: 600 !important;
+        border-radius: 6px !important;
+        width: 150px !important; /* Buton genişliğini sabitledik */
+    }}
+    div[data-testid="stVerticalBlock"]:has(div#{scope_id}) button[kind="primary"]:hover {{
+        background-color: #ef4444 !important;
+    }}
+
+    /* MAVİ BUTONLAR (PDF/Excel) */
+    /* Sadece bu scope içindeki secondary butonları boyar */
+    div[data-testid="stVerticalBlock"]:has(div#{scope_id}) button[kind="secondary"] {{
+        background-color: #225d97 !important; /* Solidus Mavisi */
+        border: none !important;
+        color: white !important;
+        font-weight: 600 !important;
+        border-radius: 6px !important;
+    }}
+    div[data-testid="stVerticalBlock"]:has(div#{scope_id}) button[kind="secondary"]:hover {{
+        background-color: #1a4b7c !important;
+    }}
     </style>
     """, unsafe_allow_html=True)
 
-    # Konteyner Başlangıcı
-    with st.container():
-        # Arka plan için HTML/CSS bloğu açıyoruz ama butonlar Streamlit butonu olmalı
-        # Bu yüzden st.columns kullanıp arka planı CSS ile halletmeye çalışacağız.
-        # En temiz yöntem: st.columns kullanıp, o bloğa özel stil atamak zordur.
-        # Bu yüzden basitçe "yeşil kutu içinde" gibi görünmesi için markdown ile açıp kapatacağız.
+    # --- HTML CSS KANCASI ---
+    # Bu boş div sayesinde CSS sadece bu alanın altındaki butonları etkiler
+    st.markdown(f'<div id="{scope_id}"></div>', unsafe_allow_html=True)
+
+    # --- LAYOUT (Sol ve Sağ olarak ikiye ayırıyoruz) ---
+    c_left, c_right = st.columns([1.5, 1.5])
+
+    # 1. SOL TARAFA (SolidAI)
+    with c_left:
+        # Metin ve İkon
+        st.markdown('<div class="clean-title">🤖 SolidAI ile Verilerinizi Analiz Edin!</div>', unsafe_allow_html=True)
+        # Buton (Kırmızı)
+        if st.button("SolidAI", type="primary", key=f"ai_btn_{key_suffix}"):
+            st.session_state[f"show_ai_{key_suffix}"] = True
+
+    # 2. SAĞ TARAFA (İndirme)
+    with c_right:
+        # Metin
+        st.markdown('<div class="clean-title" style="justify-content: flex-start;">Verilerinizi İndirin</div>', unsafe_allow_html=True)
         
-        st.markdown('<div class="action-bar-container">', unsafe_allow_html=True)
+        # Butonları yan yana koymak için iç kolonlar
+        d1, d2, d3 = st.columns([1, 1, 1]) # 3 parça yapıp ilk ikisini kullanıyoruz ki butonlar çok devasa olmasın
         
-        c_text, c_buttons = st.columns([2, 1.5])
-        
-        with c_text:
-            st.markdown("""
-            <div class="action-text-area">
-                <div class="action-icon">🤖</div>
-                <div>
-                    <div class="action-title">SolidAI ile Verilerinizi Analiz Edin!</div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-            
-        with c_buttons:
-            b1, b2, b3 = st.columns(3)
-            with b1:
-                if st.button("SolidAI", type="primary", key=f"ai_btn_{key_suffix}", use_container_width=True):
-                    st.session_state[f"show_ai_{key_suffix}"] = True
-            with b2:
-                # PDF GENERATION
-                try:
-                    pdf_data = create_device_pdf(target_device.unit_name, pdf_rows, stats_summary)
-                    st.download_button(
-                        "📄 PDF", 
-                        data=pdf_data,
-                        file_name=f"Rapor_{target_device.unit_name}.pdf",
-                        mime="application/pdf",
-                        key=f"pdf_btn_{key_suffix}",
-                        use_container_width=True
-                    )
-                except Exception as e:
-                    st.error("PDF Hatası")
-            with b3:
-                # EXCEL GENERATION
-                output = io.BytesIO()
-                with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                    df_export = df.drop(columns=["StartObj", "EndObj"], errors='ignore')
-                    df_export.to_excel(writer, index=False, sheet_name='Veri')
+        with d1:
+            try:
+                pdf_data = create_device_pdf(target_device.unit_name, pdf_rows, stats_summary)
                 st.download_button(
-                    "📊 Excel", 
-                    data=output.getvalue(), 
-                    file_name=f"Rapor_{target_device.unit_name}.xlsx", 
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
-                    key=f"xls_btn_{key_suffix}",
+                    "📄 PDF", 
+                    data=pdf_data,
+                    file_name=f"Rapor_{target_device.unit_name}.pdf",
+                    mime="application/pdf",
+                    key=f"pdf_btn_{key_suffix}",
                     use_container_width=True
                 )
-
-        st.markdown('</div>', unsafe_allow_html=True) # Konteyner Kapanış
+            except:
+                st.error("Hata")
         
-        if st.session_state.get(f"show_ai_{key_suffix}"):
-            st.info(f"🤖 **SolidAI Analizi:**\nCihaz bu periyotta %{ratio:.1f} verimlilikle çalışmıştır.")
+        with d2:
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                df_export = df.drop(columns=["StartObj", "EndObj"], errors='ignore')
+                df_export.to_excel(writer, index=False, sheet_name='Veri')
+            st.download_button(
+                "📊 Excel", 
+                data=output.getvalue(), 
+                file_name=f"Rapor_{target_device.unit_name}.xlsx", 
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
+                key=f"xls_btn_{key_suffix}",
+                use_container_width=True
+            )
+
+    # AI Sonuç Mesajı
+    if st.session_state.get(f"show_ai_{key_suffix}"):
+        st.markdown("<div style='margin-bottom: 15px;'></div>", unsafe_allow_html=True)
+        st.info(f"🤖 **SolidAI Analizi:**\nCihaz bu periyotta %{ratio:.1f} verimlilikle çalışmıştır.")
 
 # --- ANA EKRAN ---
 def load_view(user):
@@ -541,20 +558,35 @@ def load_view(user):
     start_dt = datetime.combine(s, datetime.min.time())
     end_dt = datetime.combine(e, datetime.max.time())
 
+   # --- X EKSENİ (00:00 SORUNU GİDERİLDİ) ---
     fig_timeline.update_layout(
         showlegend=False,
-        # X EKSENİ (00:00 hatası çözüldü)
         xaxis=dict(
             title=None,
-            type='date', # Tarih tipini zorla
-            range=[start_dt, end_dt], 
-            # Zoom seviyelerine göre formatı değiştir
+            type='date',
+            range=[start_dt, end_dt],
+            tickmode="auto",
+            nticks=10,
+            
+            # FORMATLAMA KURALLARI
             tickformatstops=[
+                # 1. Çok detaylı zoom (Saniye) -> Saat görünür
                 dict(dtickrange=[None, 1000], value="%H:%M:%S"),
                 dict(dtickrange=[1000, 60000], value="%H:%M:%S"),
-                dict(dtickrange=[60000, 3600000], value="%H:%M"),
-                dict(dtickrange=[3600000, 86400000], value="%H:%M"),
-                dict(dtickrange=[86400000, None], value="%d/%m\n%Y") # Yıl eklendi
+                
+                # 2. Dakika ve Saat zoom (KRİTİK DÜZELTME BURADA)
+                # Üst sınırı 86400000 (1 gün) yerine 86399999 yaptık.
+                # Böylece tam 1 gün (Günlük görünüm) buraya girmez, saat yazmaz.
+                # Ama zoom yapınca (aralık küçülünce) buraya girer ve saati yazar.
+                dict(dtickrange=[60000, 86399999], value="%H:%M\n%d/%m"), 
+                
+                # 3. GÜNLÜK MOD (Sadece Tarih)
+                # Tam 1 gün ve üzeri aralıklarda sadece tarih göster.
+                # 00:00 yazısı burada yer almadığı için silinmiş olur.
+                dict(dtickrange=[86400000, 604800000], value="%d/%m\n%Y"), 
+
+                # 4. Geniş Görünüm (Haftalar/Aylar) -> Sadece Tarih
+                dict(dtickrange=[604800000, None], value="%d/%m\n%Y")
             ]
         ),
         yaxis=dict(
