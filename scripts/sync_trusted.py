@@ -10,6 +10,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from backend.database import SessionLocal
 from backend.models import User, Device, TelemetryLog
+from backend.alarm_engine import check_telemetry_alarms, check_maintenance_alarms
 
 # --- AYARLAR ---
 API_BASE_URL = "https://api.trusted.dk/api"
@@ -187,6 +188,25 @@ class TrustedClient:
                         battery_pct=battery_val, 
                         temp_c=temp_val
                     ))
+
+                    # --- ALARM KONTROLÜ (YENİ) ---
+                # Telemetri Alarmleri (Pil, Hız, Şok)
+                check_telemetry_alarms(
+                    device_id=serial_no,
+                    battery_pct=battery_val,
+                    speed_kmh=pos_info.get("Speed", 0),
+                    shock_g=pos_info.get("MaxAcceleration", 0), # API'de genelde MaxAcceleration olur
+                    timestamp=ts
+                )
+
+                # Bakım Alarmları (Toplam Çalışma Saati)
+                # Not: pos_info içinde 'TotalPowerOnTimerGPS' veya 'TotalHours' olabilir.
+                # API yanıtını kontrol edip doğru alanı yazmalısın. 
+                # Genelde Trusted API'de 'TotalPowerOnTimerGPS' kullanılır.
+                current_hours = unit_info.get("TotalPowerOnTimerGPS", 0.0) 
+                if current_hours:
+                     check_maintenance_alarms(serial_no, float(current_hours))
+                # -----------------------------
         
         self.db.commit()
         print(f"✅ Tamamlandı: {added_devices} yeni, {updated_devices} güncellendi.")

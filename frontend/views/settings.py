@@ -42,7 +42,7 @@ def load_view(user):
     """, unsafe_allow_html=True)
 
     st.header("⚙️ Yapılandırma ve Ayarlar")
-    tab1, tab2, tab3 = st.tabs(["👤 Profil & Firma", "🌍 Sistem & Görünüm", "🔔 Bildirimler"])
+    tab1, tab2, tab3, tab4 = st.tabs(["👤 Profil & Firma", "🌍 Sistem & Görünüm", "🔔 Bildirimler", "👥 Ekip Yönetimi"])
     
     # -------------------------------------------------------
     # TAB 1: PROFİL & FİRMA & LOGO
@@ -186,3 +186,78 @@ def load_view(user):
                     st.session_state.user = updated_user
                     st.success("Bildirim tercihleri kaydedildi!")
                     st.rerun()
+
+    # -------------------------------------------------------
+    # TAB 4: EKİP YÖNETİMİ (YENİ)
+    # -------------------------------------------------------
+    from backend.database import create_sub_user_invite, SessionLocal, User # Importu en üste taşıyabilirsin
+    
+    with tab4: # Tab tanımlarken: tab1, tab2, tab3, tab4 = st.tabs(["...", "...", "...", "👥 Ekip Yönetimi"])
+        st.subheader("Ekip Arkadaşı Davet Et")
+        st.info("Sizinle aynı yetkilere sahip olacak ve **sadece sizin makinelerinizi** görebilecek yeni bir kullanıcı oluşturun.")
+        
+        with st.form("invite_user_form"):
+            c_inv1, c_inv2 = st.columns(2)
+            i_name = c_inv1.text_input("Ad Soyad", placeholder="Örn: Mehmet Şef")
+            i_mail = c_inv2.text_input("E-Posta", placeholder="mehmet@firma.com")
+            
+            i_user = st.text_input("Kullanıcı Adı Belirle", placeholder="mehmet_sef")
+            
+            submitted_inv = st.form_submit_button("🔗 Davet Linki Oluştur", type="primary")
+            
+            if submitted_inv:
+                if i_name and i_user:
+                    token, err = create_sub_user_invite(user.id, i_user, i_mail, i_name)
+                    if token:
+                        base_url = "http://localhost:8501" # Canlıda burası domain olacak
+                        invite_link = f"{base_url}/?invite_token={token}"
+                        
+                        st.success("✅ Kullanıcı taslağı oluşturuldu!")
+                        st.markdown(f"""
+                        **Aşağıdaki linki kopyalayıp ekip arkadaşınıza gönderin:**
+                        
+                        Ekip arkadaşınız bu linke tıkladığında kendi şifresini belirleyerek sisteme giriş yapabilecektir.
+                        """)
+                        st.code(invite_link, language="text")
+
+                        # WHATSAPP BUTONU
+                        import urllib.parse
+                        msg_text = f"Merhaba, SolidTrack sistemine giriş yapman için davet linkin: {invite_link}"
+                        encoded_msg = urllib.parse.quote(msg_text)
+                        wa_url = f"https://wa.me/?text={encoded_msg}"
+                        
+                        st.markdown(f"""
+                        <a href="{wa_url}" target="_blank" style="text-decoration: none;">
+                            <div style="
+                                display: inline-block;
+                                background-color: #25D366;
+                                color: white;
+                                padding: 10px 20px;
+                                border-radius: 8px;
+                                font-weight: bold;
+                                text-align: center;
+                                margin-top: 10px;
+                                box-shadow: 0 2px 5px rgba(0,0,0,0.2);">
+                                📲 WhatsApp ile Gönder
+                            </div>
+                        </a>
+                        """, unsafe_allow_html=True)
+                    else:
+                        st.error(f"Hata: {err}")
+                else:
+                    st.warning("Lütfen Ad Soyad ve Kullanıcı Adı alanlarını doldurun.")
+        
+        st.markdown("---")
+        st.subheader("Mevcut Ekip")
+        # Basit liste
+        db = SessionLocal()
+        # Sadece benim grubumdaki kullanıcıları getir (ve ben hariç)
+        my_team = db.query(User).filter(User.trusted_group_id == user.trusted_group_id, User.id != user.id).all()
+        db.close()
+        
+        if my_team:
+            for mate in my_team:
+                status = "🟠 Bekliyor" if mate.password_hash == "PENDING_ACTIVATION" else "🟢 Aktif"
+                st.markdown(f"**{mate.full_name}** ({mate.username}) - {status}")
+        else:
+            st.caption("Henüz ekibinizde kimse yok.")

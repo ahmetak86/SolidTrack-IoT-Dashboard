@@ -4,6 +4,11 @@ import os
 import folium
 from datetime import datetime, timedelta
 from streamlit_folium import st_folium
+from views import (
+    dashboard, map, inventory, alarms, geofence, 
+    settings, reports, ai_analysis, solid_ai, utilization_view,
+    admin_users  # <--- YENİ
+)
 
 # --- PATH AYARI ---
 # Backend modüllerini bulabilmesi için bir üst dizini yola ekliyoruz
@@ -23,6 +28,105 @@ from views import (
     utilization_view  # <--- YENİ EKLENDİ
 )
 from backend.database import login_user, get_active_share_link, get_device_telemetry, get_last_operation_stats
+
+# 1. DAVET / ŞİFRE BELİRLEME EKRANI KONTROLÜ
+if "invite_token" in st.query_params:
+    token = st.query_params["invite_token"]
+    # Yeni eklediğimiz get_invite_details fonksiyonunu da import ediyoruz
+    from backend.database import complete_user_registration, get_invite_details
+    
+    # --- ÖNCE TOKEN KONTROLÜ VE BİLGİ ALMA ---
+    invitee_user = get_invite_details(token)
+    
+    # CSS: Sayfayı Temizle ve Ortala
+    st.markdown("""
+        <style>
+        .block-container {padding-top: 3rem !important;}
+        header {visibility: hidden;}
+        .stApp {background-color: #f8f9fa;}
+        .brand-title {
+            font-family: 'Helvetica Neue', sans-serif;
+            font-size: 42px;
+            font-weight: 800;
+            color: #225d97;
+            margin-bottom: 0px;
+            letter-spacing: -1px;
+        }
+        .brand-subtitle {
+            font-size: 16px;
+            color: #666;
+            margin-bottom: 20px;
+        }
+        .welcome-text {
+            font-size: 18px;
+            color: #333;
+            line-height: 1.6;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+        .company-highlight {
+            color: #225d97;
+            font-weight: bold;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+
+    c_left, c_mid, c_right = st.columns([1, 2, 1])
+    
+    with c_mid:
+        # LOGO
+        if os.path.exists("static/logo.png"):
+            st.image("static/logo.png", width=120)
+        else:
+            st.markdown("<div style='text-align:center; font-size: 50px;'>🚜</div>", unsafe_allow_html=True)
+
+        st.markdown('<div class="brand-title">SolidTrack</div>', unsafe_allow_html=True)
+        st.markdown('<div class="brand-subtitle">IoT Filo Yönetim Sistemi</div>', unsafe_allow_html=True)
+        st.divider()
+
+        if not invitee_user:
+            st.error("⚠️ Bu davet linki geçersiz veya süresi dolmuş.")
+        else:
+            # --- DİNAMİK KARŞILAMA MESAJI ---
+            # Firma adını invitee_user objesinden alıyoruz
+            firma_adi = invitee_user.company_name if invitee_user.company_name else "SolidTrack"
+            
+            st.markdown(f"""
+            <div class="welcome-text">
+                <span class="company-highlight">{firma_adi}</span> yönetimi tarafından 
+                <b>SolidTrack IoT ve Operasyonel Analitik Platformu</b>'na davet edildiniz.<br><br>
+                Platforma giriş yapmak ve hesabınızı aktifleştirmek için lütfen şifrenizi belirleyiniz.
+            </div>
+            """, unsafe_allow_html=True)
+            
+            st.info(f"👤 Kullanıcı Adınız: **{invitee_user.username}**")
+            
+            with st.form("set_pass_form", clear_on_submit=True):
+                p1 = st.text_input("Yeni Şifre", type="password", placeholder="******")
+                p2 = st.text_input("Şifre Tekrar", type="password", placeholder="******")
+                
+                st.write("")
+                submit = st.form_submit_button("🚀 Kaydı Tamamla & Giriş Yap", type="primary", use_container_width=True)
+                
+                if submit:
+                    if p1 != p2:
+                        st.error("⚠️ Şifreler eşleşmiyor!")
+                    elif len(p1) < 4:
+                        st.error("⚠️ Şifre en az 4 karakter olmalı.")
+                    else:
+                        success, msg = complete_user_registration(token, p1)
+                        if success:
+                            st.success(f"Harika! Hesabınız oluşturuldu. Giriş ekranına yönlendiriliyorsunuz...")
+                            # st.balloons()  <-- BU SATIRI SİLDİK (Artık yok)
+                            
+                            st.query_params.clear()
+                            import time
+                            time.sleep(2)
+                            st.rerun()
+                        else:
+                            st.error(f"Hata: {msg}")
+    
+    st.stop()
 
 # --- SAYFA AYARI ---
 st.set_page_config(page_title="SolidTrack IoT", page_icon="🚜", layout="wide")
@@ -193,7 +297,7 @@ if not st.session_state.user:
         st.title("🚜 SolidTrack")
         st.markdown("---")
         with st.form("login_form"):
-            u = st.text_input("Kullanıcı Adı")
+            u = st.text_input("Kullanıcı Adı veya E-Posta") 
             p = st.text_input("Şifre", type="password")
             if st.form_submit_button("Giriş Yap", use_container_width=True):
                 user = login_user(u, p)
@@ -234,6 +338,9 @@ else:
             "⚙️ Ayarlar": settings
         }
         
+        if user.role == "Admin":
+            menu_options["👥 Müşteri Yönetimi"] = admin_users
+
         default_index = 0
         if "menu_selection" in st.session_state:
             try:

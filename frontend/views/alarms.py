@@ -7,8 +7,8 @@ def load_view(user):
     st.title("🔔 Alarm Yönetim Merkezi")
     
     # Verileri Çek
-    active_alarms = get_alarms(active_only=True)
-    history_alarms = get_alarms(active_only=False) # Hepsi
+    active_alarms = get_alarms(active_only=True, user_id=user.id)
+    history_alarms = get_alarms(active_only=False, user_id=user.id)
     
     # KPI Kartları (Üst Özet)
     c1, c2, c3 = st.columns(3)

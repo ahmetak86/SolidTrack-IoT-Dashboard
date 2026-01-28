@@ -1,3 +1,4 @@
+from turtle import speed
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -5,7 +6,7 @@ from backend.database import get_user_devices, get_device_telemetry, get_all_dev
 
 def load_view(user):
     st.title("🔍 Makine Sağlık Raporu")
-    devices = get_all_devices_for_admin() if user.role == 'Admin' else get_user_devices(user.id)
+    devices = get_user_devices(user.id)
     if devices:
         selected_name = st.selectbox("Analiz Edilecek Makine:", [d.unit_name for d in devices])
         device = next(d for d in devices if d.unit_name == selected_name)
@@ -17,9 +18,10 @@ def load_view(user):
             c1.metric("Pil Seviyesi", f"%{int(last.battery_pct)}")
             c2.metric("Motor Isısı", f"{int(last.temp_c)} °C")
             c3.metric("Max Darbe", f"{last.max_shock_g} G", delta_color="inverse")
-            c4.metric("Eğim (Tilt)", f"{int(last.tilt_deg)}°")
+            # Eğim verisi sensörden gelmediği için şimdilik kapattık  c4.metric("Eğim (Tilt)", f"{int(last.tilt_deg)}°")
 
-            st.write(f"**Kontak Durumu:** {'🟢 ÇALIŞIYOR' if last.speed_kmh > 0 else '⭕ KAPALI'}")
+            speed = last.speed_kmh if last.speed_kmh is not None else 0
+            st.write(f"**Kontak Durumu:** {'🟢 ÇALIŞIYOR' if speed > 0 else '⭕ KAPALI'}")
             st.progress(int(last.battery_pct) / 100)
 
             tab_a, tab_b = st.tabs(["📉 Darbe Grafiği", "🔥 Isı Grafiği"])

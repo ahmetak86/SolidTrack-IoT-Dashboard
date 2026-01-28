@@ -6,7 +6,13 @@ import os
 from datetime import datetime, timedelta, date
 import pandas as pd
 import math
-from backend.database import get_user_devices, get_device_telemetry, get_all_devices_for_admin
+from backend.database import (
+    get_user_devices, 
+    get_device_telemetry, 
+    get_all_devices_for_admin, 
+    get_device_total_hours,
+    get_last_operation_stats
+)
 
 # --- YARDIMCI FONKSİYONLAR (AYNEN KORUNDU) ---
 
@@ -87,7 +93,7 @@ def load_view(user):
         st.session_state.map_selected_device_id = target_device_serial
         st.session_state.map_route_data = None 
 
-    all_devices = get_all_devices_for_admin() if user.role == 'Admin' else get_user_devices(user.id)
+    all_devices = get_user_devices(user.id)
     if not all_devices:
         st.warning("Kayıtlı cihaz yok.")
         return
@@ -258,27 +264,37 @@ def load_view(user):
     map_layer = cluster if enable_cluster else m
     if enable_cluster: cluster.add_to(m)
 
-    # --- PİNLER ---
+    # --- PİNLER (MARKERS) ---
     for d in final_devices:
         logs = get_device_telemetry(d.device_id, limit=1)
         if logs:
             l = logs[0]
+            
+            # --- YENİ EKLENEN KISIM: GERÇEK VERİLERİ ÇEK ---
+            # 1. Toplam Çalışma Saati (UtilizationEvent tablosundan)
+            total_h = get_device_total_hours(d.device_id)
+            
+            # 2. Son Çalışma ve Adres Bilgisi
+            stats = get_last_operation_stats(d.device_id)
+            last_dur_str = stats["duration"] # Örn: "2 sa 15 dk" veya "45 dk"
+            
+            # -----------------------------------------------
+
             c_icon = get_icon_path(d.icon_type)
             icon_obj = folium.CustomIcon(icon_image=c_icon, icon_size=(64, 86), icon_anchor=(32, 86), popup_anchor=(0, -80)) if c_icon else folium.Icon(color="blue", icon="wrench", prefix="fa")
             
-            safe_speed = int(l.speed_kmh or 0)
             safe_bat = int(l.battery_pct) if l.battery_pct is not None else '--'
 
-            # Popup HTML
+            # Popup HTML (Güncellenmiş - Dummy veriler temizlendi)
             popup_html = f"""
             <div style="font-family: sans-serif; width: 240px; color:#333;">
                 <b style="font-size:14px">{d.unit_name}</b><br>
                 <span style="color:gray; font-size:11px">{d.asset_model} ({get_display_name(d.icon_type)})</span>
                 <hr style="margin:5px 0; border-top: 1px solid #ddd;">
                 <div style="font-size:12px; line-height:1.6;">
-                    📡 <b>Son Sinyal:</b> {l.timestamp.strftime('%d.%m.%Y %H:%M')}<br>
-                    ⏱️ <b>Son Çalışma:</b> -- dk<br>
-                    ∑ <b>Top. Çalışma:</b> -- Saat<br>
+                    📡 <b>Son Sinyal:</b> {l.timestamp.strftime('%d.%m %H:%M')}<br>
+                    ⏱️ <b>Son Çalışma:</b> {last_dur_str}<br>
+                    ∑ <b>Top. Çalışma:</b> {total_h} Saat<br>
                     📍 <b>Konum:</b> {l.latitude:.5f}, {l.longitude:.5f}<br>
                     🔋 <b>Pil:</b> %{safe_bat}
                 </div>

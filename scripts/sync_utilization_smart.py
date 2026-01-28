@@ -7,10 +7,15 @@ import time
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-# Import ayarları
+# --- KRİTİK DÜZELTME: PATH AYARI EN ÜSTTE OLMALI ---
+# Önce ana dizini Python'a tanıtıyoruz, sonra import yapıyoruz.
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from backend.models import Device, UtilizationEvent
+
+# Şimdi backend modüllerini çağırabiliriz (Hata vermez)
 from backend.database import SessionLocal
+from backend.models import Device, UtilizationEvent
+from backend.alarm_engine import check_utilization_alarm, check_work_hours_alarm
+# ---------------------------------------------------
 
 # --- AYARLAR ---
 API_BASE_URL = "https://api.trusted.dk/api"
@@ -24,25 +29,22 @@ def classify_event(duration, activity_val):
     kategori, renk ve veritabanı statüsünü belirler.
     """
     # DURUM 1: Activity = 0 (Boşta / Idle)
-    # API, activity'i bazen "false", bazen 0 olarak dönebilir.
     is_active = str(activity_val).lower() in ['true', '1']
     
     if not is_active:
         return {
             "cat": "Boşta Bekleme (Idle)",
-            "color": "#E0E0E0", # Çok açık gri (Görünmez gibi)
+            "color": "#E0E0E0", # Çok açık gri
             "is_burst": False,
             "raw": 0
         }
 
     # DURUM 2: Activity = 1 (Vuruş / Çalışma)
-    # Şimdi süreye göre alt kırılımlara ayıralım:
-    
     if duration > 180:
         return {
             "cat": "Nakliye / Uzun Hareket",
             "color": "#000000", # SİYAH
-            "is_burst": True,   # Grafikte görünsün istiyoruz
+            "is_burst": True,
             "raw": 1
         }
     elif duration <= 20:
@@ -80,12 +82,10 @@ class UtilizationSyncSmart:
     def sync_device_daily(self, device):
         print(f"\n🔨 {device.unit_name} ({device.device_id}) senkronize ediliyor...")
         
-        # Son 15 günü çekelim (Güvenlik marjı)
-        # İstersen burayı "Son senkronizasyon tarihinden itibaren" diye değiştirebiliriz
+        # Son 15 günü çekelim
         end_date = datetime.utcnow()
         start_date = end_date - timedelta(days=15)
         
-        # URL: Trusted API PDF'indeki parametreler
         url = f"{API_BASE_URL}/Utilization/GetUnit"
         params = {
             "SerialNumber": device.device_id,
@@ -93,8 +93,8 @@ class UtilizationSyncSmart:
             "BeforeDate": end_date.strftime("%Y-%m-%dT%H:%M:%S"),
             "Count": 10000,
             "SortDescending": "false",
-            "SeparateByDay": "false", # Tek parça gelsin
-            "ActivityFilter": "All"   # Hepsini (0 ve 1) getir!
+            "SeparateByDay": "false",
+            "ActivityFilter": "All"
         }
         
         try:
@@ -106,7 +106,6 @@ class UtilizationSyncSmart:
             raw_data = resp.json()
             data_list = []
             
-            # API Yapısını Çözme
             if isinstance(raw_data, dict):
                 if "Activities" in raw_data: data_list = raw_data["Activities"]
                 elif "List" in raw_data: data_list = raw_data["List"]
@@ -126,27 +125,21 @@ class UtilizationSyncSmart:
         count_new = 0
         
         for item in data_list:
-            # 1. Temel Verileri Al
             start_str = item.get("ActivityStart")
             duration = item.get("Duration", 0)
-            
-            # API'den gelen "Activity" (0 veya 1)
-            # Eğer Activity alanı yoksa, eski mantıkla 'True' varsaymayalım, 'False' varsayalım.
             activity_val = item.get("Activity", 0) 
 
             if not start_str: continue
             
-            # Tarihi Parse Et
             try:
                 start_ts = datetime.fromisoformat(str(start_str).split('.')[0])
             except:
                 continue
 
-            # 2. Sınıflandırma Yap (Altın Kural)
-            # Veriyi analiz et, etiketini yapıştır
+            # Sınıflandırma
             info = classify_event(duration, activity_val)
             
-            # 3. Veritabanında Var mı?
+            # DB Kontrolü
             exists = self.db.query(UtilizationEvent).filter(
                 UtilizationEvent.device_id == device.device_id,
                 UtilizationEvent.start_time == start_ts
@@ -162,16 +155,25 @@ class UtilizationSyncSmart:
                     duration_sec=duration,
                     category=info["cat"],
                     color_code=info["color"],
-                    is_burst=info["is_burst"], # True/False
-                    raw_activity=info["raw"]   # 0/1
+                    is_burst=info["is_burst"],
+                    raw_activity=info["raw"]
                 )
                 self.db.add(log)
                 count_new += 1
         
+                # --- ALARM KONTROL NOKTASI ---
+                if info["raw"] == 1:
+                    # 1. Kullanım Hatası (Uç Şişirme vb.)
+                    check_utilization_alarm(device.device_id, duration, end_ts)
+
+                    # 2. Mesai Dışı Çalışma Kontrolü
+                    check_work_hours_alarm(device.device_id, start_ts)
+                # -----------------------------
+                
         try:
             self.db.commit()
             if count_new > 0:
-                print(f"   ✅ {count_new} yeni kayıt eklendi (Activity 0 ve 1 dahil).")
+                print(f"   ✅ {count_new} yeni kayıt eklendi.")
         except Exception as e:
             self.db.rollback()
             print(f"   ⚠️ DB Kayıt Hatası: {e}")

@@ -44,6 +44,7 @@ class User(Base):
     email = Column(String, unique=True, nullable=False)
     password_hash = Column(String, nullable=False)
     role = Column(String, default='Client')
+    trusted_group_id = Column(Integer, nullable=True) # Örn: 9840 veya 7153
     
     # Profil Bilgileri
     company_name = Column(String)
@@ -78,6 +79,8 @@ class User(Base):
     geosites = relationship("GeoSite", back_populates="owner")
     report_subscriptions = relationship("ReportSubscription", back_populates="user")
 
+    reset_token = Column(String, nullable=True)
+    
 # ---------------------------------------------------------
 # 3. CİHAZLAR
 # ---------------------------------------------------------
@@ -106,6 +109,7 @@ class Device(Base):
     maintenance_interval_hours = Column(Integer, default=200)
     last_service_date = Column(DateTime)
     next_service_hours = Column(Integer)
+    last_maintenance_hour = Column(Float, default=0.0) # Son bakım yapıldığında motor saati kaçtı?
     
     # İlişkiler
     owner = relationship("User", back_populates="devices")
@@ -208,17 +212,38 @@ class GeoSite(Base):
 
     devices = relationship("Device", secondary=device_geosite_association, back_populates="geosites")
 
+# backend/models.py içindeki AlarmEvent sınıfını bununla değiştir:
+
 class AlarmEvent(Base):
     __tablename__ = 'alarm_events'
+
     id = Column(Integer, primary_key=True, autoincrement=True)
+    
+    # Hangi Cihaz?
     device_id = Column(String, ForeignKey('devices.device_id'))
-    alarm_type = Column(String)
-    severity = Column(String)
-    description = Column(String)
-    is_active = Column(Boolean, default=True)
+    
+    # --- YENİ EKLENEN ALAN: Hangi Şantiyede Oldu? ---
+    geosite_id = Column(Integer, ForeignKey("geosites.site_id"), nullable=True)
+    # -----------------------------------------------
+
+    alarm_type = Column(String)   # Örn: 'Geofence_Exit'
+    severity = Column(String)     # Örn: 'Critical', 'Warning'
+    description = Column(String)  # Örn: 'Sınır İhlali: 50m dışarıda'
+    value = Column(String, nullable=True) # Opsiyonel: Ölçülen değer
+    rule_id = Column(String, nullable=True) # Örn: "Excel_Source_18"
+
+    # Durum Yönetimi
+    is_active = Column(Boolean, default=True) # True: Alarm ötüyor, False: Çözüldü
     timestamp = Column(DateTime, default=datetime.utcnow)
     
+    # Müdahale Eden Kişi (Opsiyonel - UI için gerekli olabilir)
+    acknowledged_by = Column(String, nullable=True)
+    acknowledged_at = Column(DateTime, nullable=True)
+    resolution_note = Column(String, nullable=True) # Çözüm notu
+
+    # İlişkiler
     device = relationship("Device", back_populates="alarms")
+    geosite = relationship("GeoSite")
 
 class ShareLink(Base):
     __tablename__ = 'share_links'
@@ -231,3 +256,13 @@ class ShareLink(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     
     device = relationship("Device") # Tek yönlü ilişki yeterli
+
+    # ---------------------------------------------------------
+# 6. SİSTEM AYARLARI (Settings)
+# ---------------------------------------------------------
+class Setting(Base):
+    __tablename__ = 'settings'
+    
+    key = Column(String, primary_key=True)   # Örn: 'work_hours'
+    value = Column(String, nullable=False)   # Örn: '{"start": "08:00", "end": "18:00"}' (JSON)
+    description = Column(String)             # Örn: 'Şirket genel mesai saatleri'

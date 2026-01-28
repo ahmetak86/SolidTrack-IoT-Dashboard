@@ -5,9 +5,10 @@ from datetime import datetime, timedelta
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, joinedload
 from backend.trusted_api import api_create_geosite, api_delete_geosite, api_update_registrations, api_get_geosites
-
-# BURASI ÇOK ÖNEMLİ: ShareLink'i buraya ekledik
-from backend.models import Base, User, Device, TelemetryLog, UtilizationLog, ReportSubscription, GeoSite, AlarmEvent, ShareLink
+from passlib.context import CryptContext
+from sqlalchemy import or_
+from sqlalchemy import func
+from backend.models import Base, User, Device, TelemetryLog, UtilizationLog, ReportSubscription, GeoSite, AlarmEvent, ShareLink, UtilizationEvent
 
 # --- AKILLI ADRES AYARI ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -28,18 +29,6 @@ def get_db():
 # ---------------------------------------------------------
 # KULLANICI & CİHAZ FONKSİYONLARI
 # ---------------------------------------------------------
-def login_user(username, password):
-    db = SessionLocal()
-    user = db.query(User).filter(User.username == username, User.password_hash == str(password)).first()
-    db.close()
-    return user
-
-def get_user_devices(user_id):
-    db = SessionLocal()
-    devices = db.query(Device).filter(Device.owner_id == user_id).all()
-    db.close()
-    return devices
-
 def get_device_telemetry(device_id, limit=100):
     db = SessionLocal()
     logs = db.query(TelemetryLog).filter(TelemetryLog.device_id == device_id)\
@@ -236,14 +225,34 @@ def create_alarm(device_id, type, severity, value, desc):
     finally:
         db.close()
 
-def get_alarms(active_only=True):
+def get_alarms(active_only=True, user_id=None):
+    """
+    Kullanıcının yetkisine göre alarmları getirir.
+    """
     db = SessionLocal()
-    query = db.query(AlarmEvent).options(joinedload(AlarmEvent.device)).order_by(AlarmEvent.timestamp.desc())
-    if active_only:
-        query = query.filter(AlarmEvent.is_active == True)
-    alarms = query.all()
-    db.close()
-    return alarms
+    try:
+        query = db.query(AlarmEvent).join(Device, AlarmEvent.device_id == Device.device_id)\
+                  .options(joinedload(AlarmEvent.device))\
+                  .order_by(AlarmEvent.timestamp.desc())
+
+        # FİLTRELEME (User ID varsa)
+        if user_id:
+            user = db.query(User).filter(User.id == user_id).first()
+            if user and user.role != "Admin": # Admin değilse (veya Süper Admin değilse)
+                # Sadece kendi grubunun cihazlarına ait alarmlar
+                query = query.filter(Device.owner_id == user.id)
+            elif user and user.username != "s.ozsarac": # Ahmet Akkaya (Grup Admin) ise
+                 # Sadece kendi grubunun cihazlarına ait alarmlar (Join User ile yapılabilir ama owner_id yeterli şu an)
+                 # Burada User tablosuna join atıp trusted_group_id kontrolü yapmak en doğrusu
+                 query = query.join(User, Device.owner_id == User.id)\
+                              .filter(User.trusted_group_id == user.trusted_group_id)
+
+        if active_only:
+            query = query.filter(AlarmEvent.is_active == True)
+            
+        return query.all()
+    finally:
+        db.close()
 
 def acknowledge_alarm(alarm_id, user_name):
     db = SessionLocal()
@@ -276,21 +285,28 @@ def get_daily_utilization(device_id, days=7):
     
     db.close()
     
+    # --- daily_stats SÖZLÜĞÜNÜ BURADA TANIMLIYORUZ ---
     daily_stats = {}
     for i in range(days):
         d_str = (end_date - timedelta(days=i)).strftime("%Y-%m-%d")
         daily_stats[d_str] = {"hours": 0, "distance": 0, "max_speed": 0}
 
+    # --- VERİLERİ İŞLEME ---
     for log in logs:
         day_str = log.timestamp.strftime("%Y-%m-%d")
+        
         if day_str in daily_stats:
-            if log.speed_kmh > 1:
+            # Hız verisi None ise 0 kabul et
+            speed = log.speed_kmh if log.speed_kmh is not None else 0.0
+            
+            if speed > 1:
                 daily_stats[day_str]["hours"] += 0.25 
-            if log.speed_kmh > 0:
-                daily_stats[day_str]["distance"] += (log.speed_kmh * 0.25)
-            if log.speed_kmh > daily_stats[day_str]["max_speed"]:
-                daily_stats[day_str]["max_speed"] = log.speed_kmh
+            if speed > 0:
+                daily_stats[day_str]["distance"] += (speed * 0.25)
+            if speed > daily_stats[day_str]["max_speed"]:
+                daily_stats[day_str]["max_speed"] = speed
 
+    # --- SONUÇ FORMATLAMA ---
     result = []
     for date, stat in daily_stats.items():
         result.append({
@@ -302,26 +318,52 @@ def get_daily_utilization(device_id, days=7):
     result.sort(key=lambda x: x["Tarih"])
     return result
 
-def get_fleet_summary_report():
+def get_fleet_summary_report(user_id=None):
+    """
+    Kullanıcının yetkisine göre özet rapor hazırlar.
+    """
     db = SessionLocal()
-    devices = db.query(Device).all()
-    summary = []
-    for d in devices:
-        last_24h = datetime.utcnow() - timedelta(days=1)
-        logs_count = db.query(TelemetryLog).filter(
-            TelemetryLog.device_id == d.device_id,
-            TelemetryLog.timestamp >= last_24h,
-            TelemetryLog.speed_kmh > 0
-        ).count()
-        work_hours = logs_count * 0.25
-        summary.append({
-            "Makine": d.unit_name,
-            "Model": d.asset_model,
-            "Bugün Çalışma": f"{work_hours} Saat",
-            "Durum": "Aktif" if d.is_active else "Pasif"
-        })
-    db.close()
-    return summary
+    try:
+        # Eğer user_id verilmişse, o kullanıcının cihazlarını bulalım
+        if user_id:
+            # get_user_devices mantığının aynısını buraya uyguluyoruz (DB session içinde olduğumuz için)
+            user = db.query(User).filter(User.id == user_id).first()
+            if user:
+                if user.username == "s.ozsarac": # Patron
+                    devices = db.query(Device).all()
+                else: # Grup Admini veya Müşteri
+                    # Kullanıcının grubuyla eşleşen cihazları bul
+                    devices = db.query(Device).join(User, Device.owner_id == User.id)\
+                                .filter(User.trusted_group_id == user.trusted_group_id).all()
+            else:
+                devices = []
+        else:
+            # User ID yoksa boş dön (Güvenlik)
+            devices = []
+
+        summary = []
+        for d in devices:
+            # Son 24 saatteki hareketleri say
+            last_24h = datetime.utcnow() - timedelta(days=1)
+            logs_count = db.query(TelemetryLog).filter(
+                TelemetryLog.device_id == d.device_id,
+                TelemetryLog.timestamp >= last_24h,
+                TelemetryLog.speed_kmh > 0
+            ).count()
+            
+            # Basit hesap: Her log 15 saniye olsa (örnek) veya direk log sayısı
+            # Burayı kendi mantığına göre düzeltebilirsin, şimdilik basit tuttum
+            work_hours = round(logs_count * (10/3600), 2) # Örn: her log 10 saniye ise saate çevir
+            
+            summary.append({
+                "Makine": d.unit_name,
+                "Model": d.asset_model,
+                "Bugün Çalışma": f"{work_hours} Saat",
+                "Durum": "Aktif" if d.is_active else "Pasif"
+            })
+        return summary
+    finally:
+        db.close()
 
 # ---------------------------------------------------------
 # 7. PUBLIC LINK (PAYLAŞIM) FONKSİYONLARI (V2 - GÜNCEL)
@@ -412,48 +454,55 @@ def revoke_share_link(token):
 
 def get_last_operation_stats(device_id):
     """
-    Cihazın son çalışma periyodunu hesaplar ve GERÇEK ADRESİ çeker.
+    Cihazın son çalışma periyodunu ve adresini GERÇEK veriden çeker.
     """
     db = SessionLocal()
-    
-    # 1. Cihazın kendisini çekelim (Adres için)
-    device = db.query(Device).filter(Device.device_id == device_id).first()
-    
-    # 2. Son hareket ettiği zamanı bul
-    last_move = db.query(TelemetryLog).filter(
-        TelemetryLog.device_id == device_id, 
-        TelemetryLog.speed_kmh > 0
-    ).order_by(TelemetryLog.timestamp.desc()).first()
-    
     result = {
-        "last_seen": "Uzun süredir sinyal yok",
+        "last_seen": "Veri yok",
         "duration": "0 dk",
-        # BURASI DÜZELDİ: Veritabanındaki gerçek adresi alıyoruz
-        "address": device.address if (device and device.address) else "Konum verisi bekleniyor"
+        "address": "Konum verisi bekleniyor"
     }
     
-    if last_move:
-        # Son görülme zamanı
-        diff = datetime.utcnow() - last_move.timestamp
-        days = diff.days
-        hours = int(diff.seconds / 3600)
-        mins = int((diff.seconds % 3600) / 60)
-        
-        time_str = ""
-        if days > 0: time_str += f"{days} gün "
-        if hours > 0: time_str += f"{hours} sa "
-        time_str += f"{mins} dk önce"
-        
-        result["last_seen"] = time_str
-        
-        # Basit Simülasyon: Son çalışma süresi
-        import random
-        simulated_duration = random.choice([45, 120, 210, 30]) 
-        h = int(simulated_duration / 60)
-        m = simulated_duration % 60
-        result["duration"] = f"{h} saat {m} dakika"
+    try:
+        # 1. ADRES ve SON SİNYAL (Device tablosundan)
+        device = db.query(Device).filter(Device.device_id == device_id).first()
+        if device:
+            if device.address: result["address"] = device.address
+            
+            # Son sinyal zamanı için TelemetryLog'a bakıyoruz
+            last_log = db.query(TelemetryLog).filter(TelemetryLog.device_id == device_id)\
+                         .order_by(TelemetryLog.timestamp.desc()).first()
+            
+            if last_log:
+                diff = datetime.utcnow() - last_log.timestamp
+                if diff.days > 0:
+                    result["last_seen"] = f"{diff.days} gün önce"
+                elif diff.seconds > 3600:
+                    result["last_seen"] = f"{diff.seconds // 3600} sa önce"
+                else:
+                    result["last_seen"] = f"{diff.seconds // 60} dk önce"
 
-    db.close()
+        # 2. SON ÇALIŞMA SÜRESİ (UtilizationEvent tablosundan)
+        # En son biten 'Çalışma' olayını bul
+        last_work = db.query(UtilizationEvent).filter(
+            UtilizationEvent.device_id == device_id,
+            UtilizationEvent.raw_activity > 0
+        ).order_by(UtilizationEvent.start_time.desc()).first()
+
+        if last_work:
+            m = last_work.duration_sec // 60
+            h = m // 60
+            m = m % 60
+            if h > 0:
+                result["duration"] = f"{h} sa {m} dk"
+            else:
+                result["duration"] = f"{m} dk"
+
+    except Exception as e:
+        print(f"Stats Hatası: {e}")
+    finally:
+        db.close()
+    
     return result
 
 # backend/database.py
@@ -621,5 +670,233 @@ def toggle_geosite_alarm_status(site_id, is_active):
         print(f"Alarm Toggle Hatası: {e}")
         db.rollback()
         return False
+    finally:
+        db.close()
+
+        # --- ŞİFRELEME MOTORU ---
+pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
+
+def get_password_hash(password):
+    """Şifreyi kriptolar."""
+    return pwd_context.hash(password)
+
+def verify_password(plain_password, hashed_password):
+    """Girilen şifre ile kayıtlı olanı kıyaslar."""
+    return pwd_context.verify(plain_password, hashed_password)
+
+# --- BU KISMI DOSYANIN EN ALTINA EKLE ---
+
+def login_user(identifier, password):
+    """
+    Kullanıcı Adı VEYA E-Posta ile giriş yapılmasını sağlar.
+    """
+    db = SessionLocal()
+    try:
+        # Hem username hem email sütununda arama yapıyoruz (OR mantığı)
+        user = db.query(User).filter(
+            or_(User.username == identifier, User.email == identifier)
+        ).first()
+        
+        if not user:
+            return None
+        
+        # Şifre kontrolü
+        if not verify_password(password, user.password_hash):
+            return None
+            
+        return user
+    finally:
+        db.close()
+
+def get_user_devices(user_id: str):
+    """
+    Kullanıcının yetkisine ve GRUBUNA göre cihazları getirir.
+    """
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user: return []
+
+        # 1. SÜPER ADMINLER (Tanrı Modu)
+        # Bu listedeki herkes tüm cihazları görür.
+        super_admins = ["s.ozsarac", "a.akkaya"]
+        
+        if user.username in super_admins:
+            return db.query(Device).order_by(Device.is_active.desc()).all()
+
+        # 2. GRUP VE MÜŞTERİLER
+        # Mantık: "Cihazın Sahibinin Grubu" == "Benim Grubum" ise göster.
+        # Ahmet (7153) -> Serkan Bey'in (7153) cihazlarını görür.
+        # Chris (9840) -> Kendi (9840) cihazlarını görür.
+        devices = db.query(Device).join(User, Device.owner_id == User.id)\
+                    .filter(User.trusted_group_id == user.trusted_group_id)\
+                    .order_by(Device.is_active.desc())\
+                    .all()
+        
+        return devices
+    finally:
+        db.close()
+
+def create_sub_user_invite(parent_user_id, new_username, new_email, new_name):
+    """
+    Mevcut kullanıcının (parent) grubuyla AYNI grupta yeni bir kullanıcı oluşturur.
+    AYNI EMAIL veya AYNI KULLANICI ADI varsa işlemi reddeder.
+    """
+    db = SessionLocal()
+    try:
+        # 1. Ana kullanıcıyı bul
+        parent = db.query(User).filter(User.id == parent_user_id).first()
+        if not parent: return None, "Ana kullanıcı bulunamadı."
+        
+        # --- GÜVENLİK KONTROLÜ 1: KULLANICI ADI ---
+        if db.query(User).filter(User.username == new_username).first():
+            return None, "❌ Bu Kullanıcı Adı zaten alınmış. Lütfen başka bir ad seçin."
+
+        # --- GÜVENLİK KONTROLÜ 2: E-POSTA (YENİ EKLENDİ) ---
+        if db.query(User).filter(User.email == new_email).first():
+            return None, "❌ Bu E-Posta adresi ile kayıtlı bir kullanıcı zaten var."
+
+        # 3. Yeni Token ve ID
+        import uuid
+        invite_token = str(uuid.uuid4())
+        new_id = f"u_{uuid.uuid4().hex[:8]}"
+        
+        # 4. Kullanıcıyı oluştur
+        new_user = User(
+            id=new_id,
+            username=new_username,
+            email=new_email,
+            password_hash="PENDING_ACTIVATION", # Geçici
+            role=parent.role,
+            trusted_group_id=parent.trusted_group_id, # Aynı gruba ekle
+            company_name=parent.company_name,
+            full_name=new_name,
+            reset_token=invite_token
+        )
+        db.add(new_user)
+        db.commit()
+        
+        return invite_token, None
+    except Exception as e:
+        db.rollback()
+        return None, str(e)
+    finally:
+        db.close()
+
+def complete_user_registration(token, new_password):
+    """
+    Token ile gelen kullanıcının şifresini belirler ve hesabı aktif eder.
+    """
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.reset_token == token).first()
+        if not user:
+            return False, "Geçersiz veya süresi dolmuş davet linki."
+            
+        # Şifreyi güncelle
+        user.password_hash = get_password_hash(new_password)
+        user.reset_token = None # Token'ı sil (tek kullanımlık)
+        db.commit()
+        return True, user.username
+    except Exception as e:
+        return False, str(e)
+    finally:
+        db.close()
+
+# backend/database.py - EN ALTA EKLE
+
+def get_invite_details(token):
+    """
+    Token geçerli mi diye bakar ve davet edilen kullanıcının bilgilerini döner.
+    Böylece ekranda 'HKM Hidrolik sizi davet etti' yazabiliriz.
+    """
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.reset_token == token).first()
+        return user # Kullanıcı objesini döner (Bulamazsa None)
+    finally:
+        db.close()
+
+def get_device_total_hours(device_id):
+    """
+    Cihazın UtilizationEvent tablosundaki TÜM çalışma sürelerini toplar.
+    """
+    db = SessionLocal()
+    try:
+        # raw_activity > 0 olan (yani çalışan) tüm kayıtların süresini topla
+        total_sec = db.query(func.sum(UtilizationEvent.duration_sec)).filter(
+            UtilizationEvent.device_id == device_id,
+            UtilizationEvent.raw_activity > 0
+        ).scalar()
+        
+        if total_sec:
+            return round(total_sec / 3600, 1) # Saate çevir
+        return 0.0
+    except Exception as e:
+        return 0.0
+    finally:
+        db.close()
+
+def get_fleet_efficiency_metrics(user_id):
+    """
+    Kullanıcının filosunun GENEL verimlilik puanını ve geçen haftaya göre değişimini (trend) hesaplar.
+    Verimlilik = (İdeal + Riskli Çalışma Süresi) / Toplam Çalışma Süresi
+    """
+    db = SessionLocal()
+    try:
+        # 1. Kullanıcının Cihazlarını Bul (get_user_devices mantığıyla aynı filtre)
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user: return 0, 0
+        
+        if user.username == "s.ozsarac": # Patron hepsini görür
+            devices = db.query(Device).all()
+        else: # Grup filtresi
+            devices = db.query(Device).join(User, Device.owner_id == User.id)\
+                        .filter(User.trusted_group_id == user.trusted_group_id).all()
+            
+        device_ids = [d.device_id for d in devices]
+        if not device_ids: return 0, 0
+
+        # --- YARDIMCI HESAPLAMA FONKSİYONU ---
+        def calculate_ratio(start_date, end_date):
+            # Verilen tarih aralığındaki tüm cihazların çalışma olaylarını çek
+            events = db.query(UtilizationEvent).filter(
+                UtilizationEvent.device_id.in_(device_ids),
+                UtilizationEvent.start_time >= start_date,
+                UtilizationEvent.start_time < end_date,
+                UtilizationEvent.raw_activity > 0 # Sadece çalışma
+            ).all()
+            
+            total_sec = 0
+            efficient_sec = 0
+            
+            for e in events:
+                dur = e.duration_sec
+                total_sec += dur
+                # Verimlilik Kriteri: 0-40 saniye arası (İdeal + Riskli) verimli kabul edilir
+                # (utilization_view.py'deki mantığın aynısı)
+                if dur <= 40:
+                    efficient_sec += dur
+            
+            if total_sec == 0: return 0
+            return (efficient_sec / total_sec) * 100
+
+        # 2. BU HAFTA (Son 7 Gün)
+        now = datetime.utcnow()
+        week_start = now - timedelta(days=7)
+        current_score = calculate_ratio(week_start, now)
+        
+        # 3. GEÇEN HAFTA (7-14 Gün Önce)
+        prev_week_start = now - timedelta(days=14)
+        prev_score = calculate_ratio(prev_week_start, week_start)
+        
+        # 4. TREND HESAPLA (Fark)
+        trend = current_score - prev_score
+        
+        return round(current_score, 1), round(trend, 1)
+
+    except Exception as e:
+        print(f"Efficiency Error: {e}")
+        return 0, 0
     finally:
         db.close()

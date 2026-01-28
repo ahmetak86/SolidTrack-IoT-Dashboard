@@ -18,7 +18,7 @@ RULES = [
         "key": "risk", 
         "min": 21, "max": 40, 
         "color": "#FFAB00", "label": "Riskli Çalışma (21-40s)", 
-        "desc": "Uç ısınabilir.", "type": "work"
+        "desc": "Riskli uzunlukta çalışma. Uç ısınabilir.", "type": "work"
     },
     {
         "key": "mushroom", 
@@ -43,13 +43,18 @@ RULES = [
 def get_category_info(duration_sec):
     """Süreye göre hangi kategoriye girdiğini bulur."""
     for rule in RULES:
-        # Alt ve üst limit kontrolü (Kesin Aralık)
         if rule["min"] <= duration_sec <= rule["max"]:
             return rule
-    # Hiçbir aralığa girmezse (Örn: negatif süre vb.) varsayılan olarak Transport dönmeyelim,
-    # Veri hatası olabilir ama güvenli tarafta kalıp en küçük aralığı (Good) döndürebiliriz 
-    # veya None dönebiliriz. Şimdilik Nakliye yapmayalım.
-    return RULES[0] 
+    # Hiçbir kurala uymuyorsa (örn: negatif süre) en güvenli olan 'Good' dönelim.
+    return RULES[0]
+
+def format_duration_tr(seconds):
+    """Saniyeyi 'X sa Y dk' formatına çevirir."""
+    if not seconds:
+        return "0 sa 0 dk"
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    return f"{hours} sa {minutes} dk"
 
 def load_view(user):
     # --- CSS ---
@@ -73,7 +78,7 @@ def load_view(user):
             color: #D32F2F;
         }
         
-        /* Download Butonu (Solidus Mavisi & Ortalı Olacak) */
+        /* Download Butonu (Solidus Mavisi) */
         div[data-testid="stDownloadButton"] > button {
             background-color: #225d97 !important;
             color: white !important;
@@ -143,30 +148,29 @@ def load_view(user):
         render_legend()
         return
 
-    # --- DURUM 3: Veri İşleme (Kritik Sınıflandırma) ---
+    # --- DURUM 3: Veri İşleme (Hesaplamalar) ---
     data = []
     
     # Metrik Hesapları İçin Değişkenler
-    total_working_sec = 0
-    total_transport_sec = 0
-    bad_usage_sec = 0 # Mushrooming + Operator Error
+    total_working_sec = 0     # İdeal + Riskli + Mushroom + Operator Error
+    total_transport_sec = 0   # Sadece Transport (>180s)
+    
+    sum_ideal_risk = 0        # (İdeal + Riskli) toplamı -> Oran hesabı için
     
     for l in all_logs:
         dur = l.duration_sec if l.duration_sec else 0
-        
-        # 1. Kuralı Bul
         info = get_category_info(dur)
         
-        # 2. Metrik Hesapla
-        if info["type"] == "transport":
+        if info["key"] == "transport":
+            # Nakliye ise SADECE nakliye toplamına ekle, çalışma süresine ekleme
             total_transport_sec += dur
         else:
-            # Burası "Working" (Nakliye Hariç Çalışma)
+            # Nakliye değilse bu bir Çalışma süresidir
             total_working_sec += dur
             
-            # Hatalı Kullanım (Kırmızı + Mor)
-            if info["type"] == "bad_usage":
-                bad_usage_sec += dur
+            # Hatalı Kullanım Oranı formülü payı: (İdeal + Riskli)
+            if info["key"] in ["good", "risk"]:
+                sum_ideal_risk += dur
 
         data.append({
             "Başlangıç": l.start_time + timedelta(hours=3),
@@ -183,6 +187,8 @@ def load_view(user):
     st.markdown(f"**⏱️ Operasyon Zaman Çizelgesi**")
     
     category_order = [r["label"] for r in RULES]
+    # Renkleri sabitle
+    color_map_fixed = {r["label"]: r["color"] for r in RULES}
     
     fig = px.timeline(
         df, 
@@ -190,7 +196,7 @@ def load_view(user):
         x_end="Bitiş", 
         y="Görünen Kategori", 
         color="Görünen Kategori",
-        color_discrete_map={row["Görünen Kategori"]: row["Renk"] for _, row in df.iterrows()},
+        color_discrete_map=color_map_fixed,
         category_orders={"Görünen Kategori": category_order},
         height=350
     )
@@ -202,23 +208,23 @@ def load_view(user):
     m1, m2, m3, m4 = st.columns(4)
     
     # 1. Toplam Çalışma (Nakliye Hariç)
-    m1.metric("Toplam Çalışma", f"{total_working_sec / 3600:.1f} Saat")
+    m1.metric("Toplam Çalışma", format_duration_tr(total_working_sec))
     
-    # 2. Alınan Sinyal (Toplam Satır Sayısı)
+    # 2. Alınan Sinyal (Eski adı Olay Sayısı)
     m2.metric("Alınan Sinyal", f"{len(df)} Adet")
     
-    # 3. Hatalı Kullanım Oranı: (Bad / Total Working) * 100
+    # 3. Hatalı Kullanım Oranı (İstenen Formül: (İdeal + Riskli) / Toplam Çalışma)
     if total_working_sec > 0:
-        ratio = (bad_usage_sec / total_working_sec) * 100
+        ratio = (sum_ideal_risk / total_working_sec) * 100
     else:
         ratio = 0.0
         
-    m3.metric("Hatalı Kullanım", f"%{ratio:.1f}", delta="-Yüksek" if ratio > 10 else "Normal", delta_color="inverse")
+    m3.metric("Hatalı Kullanım Oranı", f"%{ratio:.1f}", delta="İyi" if ratio > 80 else "Kötü")
     
-    # 4. Toplam Nakliye (Sadece > 180 sn olanlar)
-    m4.metric("Toplam Nakliye", f"{total_transport_sec / 3600:.1f} Saat")
+    # 4. Toplam Nakliye
+    m4.metric("Toplam Nakliye", format_duration_tr(total_transport_sec))
 
-    # --- EXPORT BUTONU (ORTALI VE SABİT GENİŞLİK) ---
+    # --- EXPORT BUTONU (ORTALI VE İÇERİK GENİŞLİĞİNDE) ---
     st.markdown("---")
     
     output = io.BytesIO()
@@ -233,15 +239,16 @@ def load_view(user):
     
     excel_data = output.getvalue()
     
-    # Butonu ortalamak için kolon hilesi
-    b1, b2, b3 = st.columns([1, 2, 1])
+    # Butonu ortalamak için kolonları ayarlıyoruz
+    b1, b2, b3 = st.columns([5, 2, 5]) 
     with b2:
+        # use_container_width=False yaparak butonu metin genişliğine çekiyoruz
         st.download_button(
-            label="📥 Operasyon Detaylarını Excel (.xlsx) Olarak İndir",
+            label="📥 Operasyon Detaylarını Excel Olarak İndir",
             data=excel_data,
             file_name=f"SolidTrack_Analiz_{target_device.device_id}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True # Kolonun tamamını kaplasın (ama kolon dar olduğu için buton devasa olmaz)
+            use_container_width=False 
         )
 
     # --- REFERANS TABLO ---

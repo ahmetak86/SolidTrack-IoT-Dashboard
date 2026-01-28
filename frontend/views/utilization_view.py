@@ -265,7 +265,7 @@ def load_view(user):
     st.title("🔨 Kırıcı Verimlilik Analizi")
 
     # 1. CİHAZ VE FİLTRELER
-    devices = get_all_devices_for_admin() if user.role == 'Admin' else get_user_devices(user.id)
+    devices = get_user_devices(user.id)
     if not devices:
         st.warning("Cihaz bulunamadı.")
         return

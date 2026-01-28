@@ -1,35 +1,78 @@
-import sqlite3
+import sys
 import os
+import logging
+from sqlalchemy import text, inspect
 
-# Veritabanı dosyasının yolu
-# Eğer backend klasöründeyse 'backend/solidtrack.db' olarak değiştirin
-DB_FILE = "solidtrack.db" 
+# Backend klasörünü yola ekle
+sys.path.append(os.path.join(os.path.dirname(__file__), 'backend'))
 
-if not os.path.exists(DB_FILE):
-    # Belki backend klasöründedir, orayı kontrol et
-    if os.path.exists(os.path.join("backend", "solidtrack.db")):
-        DB_FILE = os.path.join("backend", "solidtrack.db")
-    else:
-        print(f"❌ HATA: {DB_FILE} dosyası bulunamadı! Lütfen dosya yolunu kontrol edin.")
-        exit()
+from database import engine, Base
+# Modelleri import ediyoruz
+from models import Device, AlarmEvent, Setting
 
-print(f"🔧 Veritabanı Güncelleniyor: {DB_FILE}")
+# Loglama ayarı
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-try:
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    
-    # Yeni kolon ekleme komutu
-    # raw_activity kolonu ekleniyor, varsayılan değeri 1 yapıyoruz.
-    cursor.execute("ALTER TABLE utilization_events ADD COLUMN raw_activity INTEGER DEFAULT 1")
-    
-    conn.commit()
-    print("✅ BAŞARILI: 'raw_activity' kolonu eklendi. Verileriniz güvende.")
-    
-except sqlite3.OperationalError as e:
-    if "duplicate column" in str(e):
-        print("ℹ️ BİLGİ: Bu kolon zaten ekli, tekrar işlem yapmaya gerek yok.")
-    else:
-        print(f"❌ Bir hata oluştu: {e}")
-finally:
-    conn.close()
+def upgrade_database():
+    """
+    Mevcut veritabanı şemasını verileri silmeden günceller.
+    SQLite sürüm uyumsuzluğunu aşmak için önce kontrol eder, sonra ekler.
+    """
+    logger.info("Veritabanı güncellemesi başlatılıyor...")
+
+    # Veritabanı yapısını incelemek için Inspector kullanıyoruz
+    inspector = inspect(engine)
+
+    with engine.connect() as connection:
+        trans = connection.begin()
+        try:
+            # ---------------------------------------------------------
+            # 1. DEVICES TABLOSU KONTROLÜ
+            # ---------------------------------------------------------
+            if inspector.has_table("devices"):
+                # Mevcut sütunları al
+                columns = [col['name'] for col in inspector.get_columns("devices")]
+                
+                if "last_maintenance_hour" not in columns:
+                    logger.info("'devices' tablosuna 'last_maintenance_hour' ekleniyor...")
+                    # 'IF NOT EXISTS' kullanmadan direkt ekliyoruz çünkü yukarıda olmadığını teyit ettik
+                    connection.execute(text("ALTER TABLE devices ADD COLUMN last_maintenance_hour FLOAT DEFAULT 0.0"))
+                else:
+                    logger.info("'devices' tablosunda 'last_maintenance_hour' zaten var. Atlanıyor.")
+            
+            # ---------------------------------------------------------
+            # 2. ALARM_EVENTS TABLOSU KONTROLÜ
+            # ---------------------------------------------------------
+            if inspector.has_table("alarm_events"):
+                # Mevcut sütunları al
+                alarm_columns = [col['name'] for col in inspector.get_columns("alarm_events")]
+                
+                if "rule_id" not in alarm_columns:
+                    logger.info("'alarm_events' tablosuna 'rule_id' ekleniyor...")
+                    connection.execute(text("ALTER TABLE alarm_events ADD COLUMN rule_id VARCHAR"))
+                else:
+                    logger.info("'alarm_events' tablosunda 'rule_id' zaten var. Atlanıyor.")
+
+            trans.commit()
+            logger.info("Sütun ekleme işlemleri başarılı.")
+            
+        except Exception as e:
+            trans.rollback()
+            logger.error(f"Sütun eklerken hata oluştu: {e}")
+            return
+
+    # ---------------------------------------------------------
+    # 3. YENİ TABLOLARI OLUŞTURMA (Settings vb.)
+    # ---------------------------------------------------------
+    logger.info("Eksik tablolar kontrol ediliyor ve oluşturuluyor...")
+    try:
+        Base.metadata.create_all(bind=engine)
+        logger.info("Tablo oluşturma işlemleri tamamlandı.")
+    except Exception as e:
+        logger.error(f"Tablo oluştururken hata: {e}")
+
+    logger.info("🚀 Veritabanı güncellemesi başarıyla tamamlandı!")
+
+if __name__ == "__main__":
+    upgrade_database()
