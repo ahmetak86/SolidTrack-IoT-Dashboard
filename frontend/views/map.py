@@ -3,9 +3,19 @@ import folium
 from folium.plugins import MarkerCluster, Fullscreen, AntPath
 from streamlit_folium import st_folium
 import os
+import sys
 from datetime import datetime, timedelta, date
 import pandas as pd
 import math
+
+# 1. ÖNCE ANA KLASÖRÜ TANIT
+# (Burada .. .. yaparak SolidTrack klasörüne çıkıyoruz)
+current_dir = os.path.dirname(os.path.abspath(__file__))
+root_dir = os.path.dirname(os.path.dirname(current_dir))
+sys.path.append(root_dir)
+
+# 2. SONRA DİĞER DOSYALARI ÇAĞIR
+from frontend.utils import format_date_for_ui
 from backend.database import (
     get_user_devices, 
     get_device_telemetry, 
@@ -270,29 +280,27 @@ def load_view(user):
         if logs:
             l = logs[0]
             
-            # --- YENİ EKLENEN KISIM: GERÇEK VERİLERİ ÇEK ---
-            # 1. Toplam Çalışma Saati (UtilizationEvent tablosundan)
+            # 1. ÖNCE ZAMANI HESAPLA (Bu satır eksik veya aşağıda kalmış olabilir)
+            signal_time_str = format_date_for_ui(l.timestamp, user.timezone, include_offset=True)
+            
+            # 2. DİĞER İSTATİSTİKLERİ ÇEK
             total_h = get_device_total_hours(d.device_id)
-            
-            # 2. Son Çalışma ve Adres Bilgisi
             stats = get_last_operation_stats(d.device_id)
-            last_dur_str = stats["duration"] # Örn: "2 sa 15 dk" veya "45 dk"
+            last_dur_str = stats["duration"]
             
-            # -----------------------------------------------
-
+            # 3. İKON VE PİL
             c_icon = get_icon_path(d.icon_type)
             icon_obj = folium.CustomIcon(icon_image=c_icon, icon_size=(64, 86), icon_anchor=(32, 86), popup_anchor=(0, -80)) if c_icon else folium.Icon(color="blue", icon="wrench", prefix="fa")
-            
             safe_bat = int(l.battery_pct) if l.battery_pct is not None else '--'
 
-            # Popup HTML (Güncellenmiş - Dummy veriler temizlendi)
+            # 4. POPUP HTML (Artık signal_time_str tanımlı olduğu için hata vermez)
             popup_html = f"""
             <div style="font-family: sans-serif; width: 240px; color:#333;">
                 <b style="font-size:14px">{d.unit_name}</b><br>
                 <span style="color:gray; font-size:11px">{d.asset_model} ({get_display_name(d.icon_type)})</span>
                 <hr style="margin:5px 0; border-top: 1px solid #ddd;">
                 <div style="font-size:12px; line-height:1.6;">
-                    📡 <b>Son Sinyal:</b> {l.timestamp.strftime('%d.%m %H:%M')}<br>
+                    📡 <b>Son Sinyal:</b> {signal_time_str}<br>
                     ⏱️ <b>Son Çalışma:</b> {last_dur_str}<br>
                     ∑ <b>Top. Çalışma:</b> {total_h} Saat<br>
                     📍 <b>Konum:</b> {l.latitude:.5f}, {l.longitude:.5f}<br>

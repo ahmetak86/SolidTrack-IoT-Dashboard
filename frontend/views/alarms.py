@@ -1,6 +1,14 @@
-# frontend/views/alarms.py (FİNAL VERSİYON)
+# frontend/views/alarms.py (FİNAL + SAAT DÜZELTMELİ)
 import streamlit as st
 import pandas as pd
+import sys
+import os
+
+# 1. ÖNCE ANA KLASÖRÜ TANIT (YOL TARİFİ)
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+
+# 2. SONRA KENDİ MODÜLLERİMİZİ ÇAĞIR
+from frontend.utils import format_date_for_ui
 from backend.database import get_alarms, acknowledge_alarm
 
 def load_view(user):
@@ -34,7 +42,13 @@ def load_view(user):
                 color = "red" if alarm.severity == 'Critical' else "orange"
                 icon = "💥" if alarm.alarm_type == 'Shock' else "🔋" if 'Battery' in alarm.alarm_type else "🚧"
                 
-                with st.expander(f":{color}[{icon} **{alarm.alarm_type}**] - {alarm.device.unit_name} ({alarm.timestamp.strftime('%H:%M')})", expanded=True):
+                # --- SAAT AYARI (Global Standart) ---
+                # Başlık için sadece saati alıyoruz (Örn: 14:30)
+                short_time = format_date_for_ui(alarm.timestamp, user.timezone, include_offset=False).split(" ")[1]
+                # İçerik için tam format (Örn: 29.01.2026 14:30 UTC+03:00)
+                full_time = format_date_for_ui(alarm.timestamp, user.timezone, include_offset=True)
+
+                with st.expander(f":{color}[{icon} **{alarm.alarm_type}**] - {alarm.device.unit_name} ({short_time})", expanded=True):
                     c_a, c_b, c_c = st.columns([2, 1, 1])
                     
                     with c_a:
@@ -43,7 +57,7 @@ def load_view(user):
                         st.caption(f"Cihaz: {alarm.device.asset_model} (SN: {alarm.device_id})")
                     
                     with c_b:
-                        st.write(f"**Zaman:** {alarm.timestamp.strftime('%d.%m.%Y %H:%M')}")
+                        st.write(f"**Zaman:** {full_time}")
                         st.markdown(f"**Önem:** :{color}[{alarm.severity}]")
                         
                     with c_c:
@@ -63,7 +77,8 @@ def load_view(user):
             for a in history_alarms:
                 data.append({
                     "ID": a.id,
-                    "Zaman": a.timestamp,
+                    # Tabloda UTC ofsetini göstermeyelim, çok yer kaplar
+                    "Zaman": format_date_for_ui(a.timestamp, user.timezone, include_offset=False),
                     "Cihaz": a.device.unit_name,
                     "Tip": a.alarm_type,
                     "Önem": a.severity,
@@ -112,4 +127,3 @@ def load_view(user):
         else:
             st.info("Kayıt bulunamadı.")
     st.markdown('<div style="height: 50px;"></div>', unsafe_allow_html=True)
-    

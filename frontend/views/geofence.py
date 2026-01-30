@@ -1,14 +1,21 @@
-# frontend/views/geofence.py
 import streamlit as st
 import pandas as pd
 import folium
 import time
+import sys
+import os
 from streamlit_folium import st_folium
 from geopy.geocoders import Nominatim
+
+# 1. ÖNCE ANA KLASÖRÜ TANIT
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+
+# 2. SONRA DİĞER DOSYALARI ÇAĞIR
+from frontend.utils import format_date_for_ui
 from backend.database import (
     create_geosite, get_user_geosites, delete_geosite, update_geosite, 
     get_user_devices, update_geosite_devices,
-    SessionLocal, GeoSite, update_user_settings, sync_geosites_from_trusted # <-- YENİ EKLENDİ
+    SessionLocal, GeoSite, update_user_settings, sync_geosites_from_trusted
 )
 
 # --- YARDIMCI: ADRES BULUCU ---
@@ -142,7 +149,7 @@ def render_list_view(user):
                 st.markdown(f"**📏 Şantiye Yarıçapı: {site.radius_meters}m**")
                 
                 # 3. Tarih (Gri ve küçük)
-                created_str = site.created_at.strftime("%d.%m.%Y %H:%M") if site.created_at else "Bilinmiyor"
+                created_str = format_date_for_ui(site.created_at, user.timezone) if site.created_at else "Bilinmiyor"
                 st.caption(f"📅 Şantiye Oluşturulma Tarihi: {created_str}")
 
                 # --- SIKIŞIK SEPERATÖR ---

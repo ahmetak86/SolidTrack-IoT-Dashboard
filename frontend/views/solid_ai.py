@@ -1,6 +1,14 @@
+# frontend/views/solid_ai.py (V2 - ZAMAN FARKINDALIĞI EKLENDİ)
 import streamlit as st
 import google.generativeai as genai
 import os
+import sys
+from datetime import datetime
+
+# --- 1. YOL TANIMLAMASI VE IMPORTLAR ---
+# Ana klasörü tanıtıyoruz ki 'frontend.utils' dosyasını bulabilsin
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+from frontend.utils import format_date_for_ui
 
 # --- AYARLAR ---
 GEMINI_API_KEY = "AIzaSyBhhTMXAEamKC2mLtCSgvcd-F4895N4QmY" 
@@ -11,7 +19,8 @@ try:
 except ImportError:
     HKM_KNOWLEDGE_BASE = "Genel hidrolik prensipleri geçerlidir."
 
-# --- SİSTEM TALİMATI ---
+# --- SİSTEM TALİMATI (BASE) ---
+# Bu temel talimat değişmez, altına dinamik bilgileri ekleyeceğiz.
 SYSTEM_INSTRUCTION = f"""
 ### KİMLİK VE ROL
 Sen, Solidus (www.solidus.work) firmasına ait "SolidTrack" filo yönetim sisteminin Uzman Yapay Zeka Asistanısın. İsmin "SolidAI". Solidus ve HKM Hidrolik kardeş firmalardır.
@@ -59,7 +68,7 @@ def load_view(user):
     # --- HEADER ---
     c1, c2, c3 = st.columns([1, 6, 2])
     with c1:
-        st.write("🤖") # İstersen buraya resim linki de koyabilirsin
+        st.write("🤖") 
     with c2:
         st.title("SolidAI Asistan")
         st.caption("HKM & Solidus Teknik Bilgi Merkezi")
@@ -80,16 +89,28 @@ def load_view(user):
         st.warning("⚠️ API Anahtarı eksik.")
         return
 
-    # --- GEMINI BAĞLANTISI ---
+    # --- GEMINI BAĞLANTISI VE DİNAMİK CONTEXT ---
     try:
+        # 1. Şu anki saati kullanıcının bölgesine göre hesapla
+        now_str = format_date_for_ui(datetime.utcnow(), user.timezone)
+
+        # 2. Talimatı güncelle (Kullanıcı adı, Saat ve Bölge bilgisini enjekte et)
+        DYNAMIC_INSTRUCTION = SYSTEM_INSTRUCTION + f"""
+
+        ### BAĞLAM BİLGİSİ (CONTEXT)
+        * **Kullanıcı:** {user.full_name}
+        * **Şu anki Tarih/Saat:** {now_str}
+        * **Kullanıcı Bölgesi:** {user.timezone}
+        """
+
         genai.configure(api_key=api_key)
         generation_config = {"temperature": 0.3, "max_output_tokens": 8192}
         
-        # En stabil model seçimi
+        # Modeli dinamik talimatla başlat
         model = genai.GenerativeModel(
             model_name="gemini-flash-latest", 
             generation_config=generation_config,
-            system_instruction=SYSTEM_INSTRUCTION
+            system_instruction=DYNAMIC_INSTRUCTION 
         )
     except Exception as e:
         st.error(f"Bağlantı Hatası: {e}")
@@ -99,8 +120,8 @@ def load_view(user):
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
         
-        # DÜZELTİLEN KISIM BURASI 👇
-        welcome = "Merhaba! 👋 Ben SolidAI. SolidTrack sistemi, hidrolik kırıcı bakımı veya operasyonel verilerinizle ilgili size nasıl yardımcı olabilirim?"
+        # Karşılama mesajını kullanıcıya özel yapabiliriz (Opsiyonel)
+        welcome = f"Merhaba {user.full_name.split()[0]} Bey! 👋 Ben SolidAI. SolidTrack sistemi, hidrolik kırıcı bakımı veya operasyonel verilerinizle ilgili size nasıl yardımcı olabilirim?"
         
         st.session_state.chat_history.append({"role": "assistant", "content": welcome})
 

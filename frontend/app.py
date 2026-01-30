@@ -2,32 +2,28 @@ import streamlit as st
 import sys
 import os
 import folium
+import urllib.parse
 from datetime import datetime, timedelta
 from streamlit_folium import st_folium
+
+# --- PATH AYARI ---
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+# --- VİEW IMPORTLARI ---
 from views import (
     dashboard, map, inventory, alarms, geofence, 
     settings, reports, ai_analysis, solid_ai, utilization_view,
-    admin_users  # <--- YENİ
+    admin_users
 )
 
-# --- PATH AYARI ---
-# Backend modüllerini bulabilmesi için bir üst dizini yola ekliyoruz
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-# --- IMPORTLAR (DÜZELTİLDİ: utilization_view EKLENDİ) ---
-from views import (
-    dashboard, 
-    map, 
-    inventory, 
-    alarms, 
-    geofence, 
-    settings, 
-    reports, 
-    ai_analysis,  
-    solid_ai,
-    utilization_view  # <--- YENİ EKLENDİ
+# --- BACKEND IMPORTLARI ---
+# Yeni fonksiyonları (reset_token vb.) buraya ekledik
+from backend.database import (
+    login_user, get_active_share_link, get_device_telemetry, get_last_operation_stats,
+    create_password_reset_token, reset_password_by_token, 
+    complete_user_registration, get_invite_details,
+    SessionLocal, User
 )
-from backend.database import login_user, get_active_share_link, get_device_telemetry, get_last_operation_stats
 
 # 1. DAVET / ŞİFRE BELİRLEME EKRANI KONTROLÜ
 if "invite_token" in st.query_params:
@@ -126,6 +122,42 @@ if "invite_token" in st.query_params:
                         else:
                             st.error(f"Hata: {msg}")
     
+    st.stop()
+
+# 2. ŞİFRE SIFIRLAMA EKRANI (Linkle Gelenler İçin)
+if "reset_token" in st.query_params:
+    token = st.query_params["reset_token"]
+    
+    st.markdown("""
+        <style>
+        .block-container {padding-top: 3rem !important;}
+        header {visibility: hidden;}
+        .stApp {background-color: #f8f9fa;}
+        </style>
+    """, unsafe_allow_html=True)
+
+    c1, c2, c3 = st.columns([1, 2, 1])
+    with c2:
+        st.info("🔐 **Şifre Sıfırlama**")
+        st.write("Lütfen hesabınız için yeni şifrenizi belirleyin.")
+        
+        with st.form("reset_pass_final"):
+            new_p1 = st.text_input("Yeni Şifre", type="password")
+            new_p2 = st.text_input("Yeni Şifre (Tekrar)", type="password")
+            
+            if st.form_submit_button("Şifreyi Değiştir", type="primary"):
+                if new_p1 == new_p2 and new_p1:
+                    success, msg = reset_password_by_token(token, new_p1)
+                    if success:
+                        st.success(msg)
+                        st.query_params.clear()
+                        import time
+                        time.sleep(2)
+                        st.rerun()
+                    else:
+                        st.error(msg)
+                else:
+                    st.error("Şifreler uyuşmuyor.")
     st.stop()
 
 # --- SAYFA AYARI ---
@@ -306,6 +338,41 @@ if not st.session_state.user:
                     st.rerun()
                 else:
                     st.error("Hatalı Giriş")
+
+            # --- ŞİFREMİ UNUTTUM MODU (YENİ) ---
+        if "forgot_mode" not in st.session_state: st.session_state.forgot_mode = False
+
+        if st.session_state.forgot_mode:
+            st.warning("🔒 Şifre Sıfırlama Linki Gönder")
+            email_input = st.text_input("E-Posta Adresiniz", key="forgot_email")
+            
+            c_f1, c_f2 = st.columns(2)
+            if c_f1.button("Linki Gönder", type="primary"):
+                token, msg = create_password_reset_token(email_input)
+                if token:
+                    # Linki oluştur (Canlıda domain olacak)
+                    base_url = "http://localhost:8501"
+                    link = f"{base_url}/?reset_token={token}"
+                    
+                    st.success("✅ Link oluşturuldu!")
+                    st.code(link, language="text") # E-posta servisi olmadığı için ekrana basıyoruz
+                    
+                    # WhatsApp ile alma kolaylığı
+                    import urllib.parse
+                    wa_text = f"SolidTrack Şifre Sıfırlama Linkim: {link}"
+                    wa_link = f"https://wa.me/?text={urllib.parse.quote(wa_text)}"
+                    st.markdown(f"[📲 WhatsApp'a Gönder]({wa_link})")
+                else:
+                    st.error(msg)
+            
+            if c_f2.button("İptal"):
+                st.session_state.forgot_mode = False
+                st.rerun()
+        else:
+            # Şifremi unuttum linki (Buton görünümlü)
+            if st.button("Şifremi Unuttum?", type="secondary", use_container_width=True):
+                st.session_state.forgot_mode = True
+                st.rerun()
         st.markdown("---")
         if st.button("🚀 Demo Modu ile Hemen Dene", use_container_width=True, type="primary"):
             user = login_user("solidus_admin", "123456") 
@@ -324,11 +391,11 @@ else:
 
         st.markdown(f"<div style='text-align: center; margin-bottom: 20px;'><b>{user.company_name}</b><br><span style='font-size:0.8em; color:gray;'>{user.full_name}</span></div>", unsafe_allow_html=True)
         
-        # MENÜ SEÇENEKLERİ (GÜNCELLENDİ: utilization_view EKLENDİ)
+        # --- MENÜ TANIMLARI ---
         menu_options = {
             "📊 Genel Bakış": dashboard,
             "🌍 Canlı İzleme": map,
-            "🔨 Kırıcı Verimliliği": utilization_view, # <--- YENİ MENÜ ÖĞESİ
+            "🔨 Kırıcı Verimliliği": utilization_view,
             "🤖 SolidAI Asistan": solid_ai,   
             "🧠 AI Veri Analizi": ai_analysis, 
             "📈 Raporlar": reports,
@@ -340,6 +407,30 @@ else:
         
         if user.role == "Admin":
             menu_options["👥 Müşteri Yönetimi"] = admin_users
+
+        # --- NORTH FALCON FİLTRESİ ---
+        # Eğer SubUser ise ve kısıtlıysa, menüyü daralt
+        if user.role == "SubUser" and user.allowed_pages:
+            allowed_list = user.allowed_pages.split(",") # Örn: "Harita,Raporlar"
+            filtered_menu = {}
+            
+            # Ayarlar her zaman açık olsun (Şifre değişimi için)
+            if "⚙️ Ayarlar" in menu_options:
+                filtered_menu["⚙️ Ayarlar"] = settings
+
+            for name, module in menu_options.items():
+                is_allowed = False
+                for allowed_item in allowed_list:
+                    # "Harita" kelimesi "🌍 Canlı İzleme" içinde geçiyor mu?
+                    if allowed_item in name: 
+                        is_allowed = True
+                        break
+                
+                if is_allowed:
+                    filtered_menu[name] = module
+            
+            # Menüyü güncelle
+            menu_options = filtered_menu
 
         default_index = 0
         if "menu_selection" in st.session_state:

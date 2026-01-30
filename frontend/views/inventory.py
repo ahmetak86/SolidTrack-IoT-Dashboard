@@ -1,12 +1,14 @@
-# frontend/views/inventory.py
 import streamlit as st
 from datetime import datetime, timedelta
 import locale
-# "backend" modülünü bulabilmesi için yol ayarı
 import sys
 import os
+
+# 1. ÖNCE ANA KLASÖRÜ TANIT
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
+# 2. SONRA DİĞER DOSYALARI ÇAĞIR
+from frontend.utils import format_date_for_ui
 from backend.database import get_user_devices, create_share_link, revoke_share_link, get_device_share_links, get_device_telemetry
 
 # Dil Ayarı (Opsiyonel)
@@ -76,7 +78,7 @@ def load_view(user):
                 st.markdown(f"**Adres:** {addr_text}") 
                 last_log = get_device_telemetry(d.device_id, limit=1)
                 if last_log:
-                    last_seen_str = last_log[0].timestamp.strftime('%d.%m.%Y, %H:%M')
+                    last_seen_str = format_date_for_ui(last_log[0].timestamp, user.timezone, include_offset=True)
                 else:
                     last_seen_str = "Sinyal Yok"
 

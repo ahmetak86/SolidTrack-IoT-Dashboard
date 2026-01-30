@@ -1,9 +1,16 @@
-# frontend/views/reports.py (V3 - FULL REAL DATA)
+# frontend/views/reports.py (V4 - STRING DATE FIX)
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 from datetime import datetime
+import sys
+import os
+
+# Ana dizin yolunu ekle (Backend ve Frontend modüllerini bulabilmesi için)
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+
 from backend.database import get_user_devices, get_daily_utilization, get_fleet_summary_report, get_all_devices_for_admin
+from frontend.utils import format_date_for_ui
 
 # --- PDF GENERATOR MOTORU (Dahili Entegrasyon) ---
 from fpdf import FPDF
@@ -74,6 +81,7 @@ def create_device_pdf_report(device_name, df_data, stats, report_type):
     # Tablo Satırları
     pdf.set_font("Arial", size=10)
     for _, row in df_data.iterrows():
+        # Tarih formatı zaten UI için düzeltilmiş olabilir, PDF için string basıyoruz
         pdf.cell(col_w, 10, str(row['Tarih']), 1)
         if 'Çalışma Saati' in df_data.columns:
             pdf.cell(col_w, 10, str(row['Çalışma Saati']), 1)
@@ -121,17 +129,24 @@ def load_view(user):
         # Veriyi Çek
         data = get_daily_utilization(selected_device.device_id, days=days_back)
         df = pd.DataFrame(data)
-        
-        if not df.empty:
+
+        if not df.empty and 'Tarih' in df.columns:
+            # --- TARİH DÜZELTME (BURASI KRİTİK DÜZELTME) ---
+            # 1. String olarak gelen tarihi önce datetime objesine çeviriyoruz (pd.to_datetime)
+            # Böylece 'tzinfo' hatası almadan formatlayabiliriz.
+            df['Tarih_Ham'] = pd.to_datetime(df['Tarih'])
+            
+            # 2. UI Gösterimi için formatla
+            df['Tarih'] = df['Tarih_Ham'].apply(lambda x: format_date_for_ui(x, user.timezone, include_offset=False))
+            
             # GERÇEK KPI HESAPLAMA
             total_hours = df["Çalışma Saati"].sum()
             avg_hours = df["Çalışma Saati"].mean()
             
-            # Kapasite Kullanım Oranı: (Ortalama Çalışma / 8 Saat Vardiya) * 100
-            # Eğer 24 saat çalışıyorsa paydayı 24 yapabiliriz. Şimdilik 8 saatlik tek vardiya varsayalım.
+            # Kapasite Kullanım Oranı
             shift_hours = 8
             utilization_score = int((avg_hours / shift_hours) * 100)
-            if utilization_score > 100: utilization_score = 100 # Max %100
+            if utilization_score > 100: utilization_score = 100
 
             # Kartlar
             k1, k2, k3 = st.columns(3)
@@ -146,6 +161,7 @@ def load_view(user):
             k3.metric("Kapasite Kullanımı (8s)", f"%{utilization_score}", delta=delta_msg)
             
             # GRAFİK (BAR CHART)
+            # Grafikte X ekseni olarak formatlanmış tarihi ('Tarih') kullanıyoruz
             fig = px.bar(
                 df, x="Tarih", y="Çalışma Saati",
                 title=f"Günlük Çalışma Süreleri (Son {days_back} Gün)",
@@ -156,14 +172,14 @@ def load_view(user):
             fig.update_traces(textposition='outside')
             fig.update_layout(yaxis_title="Saat", xaxis_title="Tarih")
             
-            # Hedef Çizgisi (8 Saat)
             fig.add_hline(y=8, line_dash="dot", annotation_text="Vardiya Hedefi (8s)", annotation_position="top right", line_color="red")
             
             st.plotly_chart(fig, use_container_width=True)
             
             # DETAY TABLOSU
             with st.expander("📄 Detaylı Günlük Tabloyu Göster"):
-                st.dataframe(df, use_container_width=True)
+                # Tabloda ham tarih sütununu gizleyelim
+                st.dataframe(df.drop(columns=['Tarih_Ham']), use_container_width=True)
                 
         else:
             st.info("Bu tarih aralığı için veri bulunamadı.")
@@ -176,17 +192,23 @@ def load_view(user):
         df = pd.DataFrame(data)
         
         if not df.empty:
+            # Tarih düzeltme (Yakıt raporunda da yapıyoruz)
+            if 'Tarih' in df.columns:
+                df['Tarih_Ham'] = pd.to_datetime(df['Tarih']) # String -> Datetime
+                df['Tarih'] = df['Tarih_Ham'].apply(lambda x: format_date_for_ui(x, user.timezone, include_offset=False))
+
             # İki Eksenli Grafik (Mesafe vs Hız)
             fig = px.line(df, x="Tarih", y="Mesafe (km)", markers=True, title="Günlük Kat Edilen Mesafe")
             fig.add_bar(x=df["Tarih"], y=df["Max Hız"], name="Max Hız (km/s)", opacity=0.3)
             st.plotly_chart(fig, use_container_width=True)
             
             st.info("ℹ️ Yakıt verisi CAN-BUS entegrasyonu tamamlandığında burada görünecektir. Şu an mesafe bazlı tahmin yürütülmektedir.")
+        else:
+            st.info("Veri yok.")
     
     # --- FİLO ÖZETİ (SAĞ TARAF / ALT KISIM) ---
     st.markdown("---")
     st.subheader("📋 Filo Hızlı Bakış (Bugün)")
-    # Burada user_id göndererek filtrelemeyi sağlıyoruz
     fleet_data = get_fleet_summary_report(user_id=user.id)
     df_fleet = pd.DataFrame(fleet_data)
     if not df_fleet.empty:
@@ -205,14 +227,12 @@ def load_view(user):
         # PDF Oluşturma Mantığı
         if report_type == "Verimlilik (Utilization)" and 'df' in locals() and not df.empty:
             
-            # PDF'e gidecek gerçek istatistikler
             stats_for_pdf = {
                 "total": f"{total_hours:.1f}",
                 "avg": f"{avg_hours:.1f}",
-                "score": f"{utilization_score}" # Gerçek skor
+                "score": f"{utilization_score}" 
             }
             
-            # PDF Binary verisini al
             pdf_bytes = create_device_pdf_report(selected_device_name, df, stats_for_pdf, report_type)
             
             st.download_button(
@@ -224,7 +244,6 @@ def load_view(user):
                 type="primary"
             )
         elif report_type == "Yakıt & Mesafe" and 'df' in locals() and not df.empty:
-             # Yakıt raporu için basit istatistik
              stats_for_pdf = {"total": "-", "avg": "-", "score": "-"}
              pdf_bytes = create_device_pdf_report(selected_device_name, df, stats_for_pdf, report_type)
              st.download_button(
