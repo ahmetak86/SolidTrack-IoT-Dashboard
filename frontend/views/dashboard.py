@@ -15,6 +15,7 @@ def load_view(user):
     
     # --- 1. KULLANICIYA ÖZEL CİHAZLARI ÇEK ---
     devices = get_user_devices(user.id)
+    devices = [d for d in devices if not d.is_virtual]
     
     # İstatistikler
     total_fleet = len(devices)

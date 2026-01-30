@@ -1,9 +1,11 @@
+# frontend/views/geofence.py
 import streamlit as st
 import pandas as pd
 import folium
 import time
 import sys
 import os
+from datetime import datetime # Sıralama için gerekli
 from streamlit_folium import st_folium
 from geopy.geocoders import Nominatim
 
@@ -21,11 +23,30 @@ from backend.database import (
 # --- YARDIMCI: ADRES BULUCU ---
 def get_address_from_coords(lat, lon):
     try:
-        geolocator = Nominatim(user_agent="solidtrack_iot_v5")
+        # User-agent çakışmasını önlemek için unique isim
+        geolocator = Nominatim(user_agent="solidtrack_iot_v9_master")
         location = geolocator.reverse((lat, lon), timeout=5)
         return location.address if location else "Adres bulunamadı"
     except:
         return "Adres servisine erişilemiyor"
+
+# --- MODAL (DIALOG) PENCERESİ: SİLME ONAYI ---
+# Kartların kaymasını ve "dans etmesini" engelleyen pop-up yapısı
+@st.dialog("⚠️ Şantiyeyi Sil")
+def show_delete_dialog(site_id, site_name):
+    st.write(f"**'{site_name}'** şantiyesini silmek üzeresiniz.")
+    st.warning("Bu işlem geri alınamaz. Devam edilsin mi?")
+    
+    col_cancel, col_confirm = st.columns(2)
+    with col_cancel:
+        if st.button("İptal", key="dlg_cancel", use_container_width=True):
+            st.rerun()
+            
+    with col_confirm:
+        if st.button("Evet, Sil", type="primary", key="dlg_confirm", use_container_width=True):
+            delete_geosite(site_id)
+            st.session_state["delete_success"] = True
+            st.rerun()
 
 # --- DB GÜNCELLEME YARDIMCISI (Toggle İçin) ---
 def update_geosite_field(site_id, field_name, value):
@@ -68,6 +89,11 @@ def load_view(user):
         </style>
     """, unsafe_allow_html=True)
 
+    # --- 1. SİLME MESAJI (EN TEPEDE) ---
+    if st.session_state.get("delete_success", False):
+        st.toast("Şantiye başarıyla silindi.", icon="🗑️")
+        st.session_state["delete_success"] = False
+
     # State Yönetimi
     if 'page_mode' not in st.session_state: st.session_state.page_mode = 'list'
     if 'edit_site_id' not in st.session_state: st.session_state.edit_site_id = None
@@ -87,18 +113,26 @@ def load_view(user):
 # ==========================================
 # 1. LİSTE GÖRÜNÜMÜ (ANA EKRAN)
 # ==========================================
-# frontend/views/geofence.py -> render_list_view
-
 def render_list_view(user):
-    # 1. HEADER ALANI
+    # HEADER ALANI
     st.title("🚧 Şantiye ve Bölge Yönetimi")
     
     c_btn_new, c_btn_sync = st.columns([1, 1])
     
     # Verileri Çek
     my_sites = get_user_geosites(user.id)
-    all_devices = get_user_devices(user.id)
     
+    # --- YENİ EKLENEN SIRALAMA KODU ---
+    # En son oluşturulan en üstte gelsin (Created At Descending)
+    # Eğer created_at boşsa listenin sonuna atar.
+    if my_sites:
+        my_sites.sort(key=lambda x: x.created_at if x.created_at else datetime.min, reverse=True)
+    # ----------------------------------
+
+    all_devices = get_user_devices(user.id)
+    # FİLTRE: Sadece Gerçek (IoT) Cihazlar
+    devices = [d for d in all_devices if not d.is_virtual] if all_devices else []
+
     with c_btn_new:
         if st.button("➕ Yeni Şantiye Oluştur", type="primary", use_container_width=True):
             st.session_state.page_mode = 'create'
@@ -126,134 +160,111 @@ def render_list_view(user):
         st.info("👋 Henüz oluşturulmuş bir şantiye bölgesi bulunmamaktadır.")
     else:
         # AKORDEON MANTIĞI
-        total_sites = len(my_sites)
         
-        for index, site in enumerate(my_sites):
-            is_expanded = False
-            if total_sites <= 2: is_expanded = True
-            elif index == 0: is_expanded = True
-            
-            # Başlık
+        for index, site in enumerate(my_sites):            
+            # Başlık Hazırlığı
             short_addr = (site.address[:50] + '...') if site.address and len(site.address) > 50 else (site.address if site.address else 'Adres Yok')
             expander_label = f"🏗️ {site.name}  —  📍 {short_addr}"
 
-            with st.expander(expander_label, expanded=is_expanded):
+            # --- KRİTİK DÜZELTME: expanded=False ---
+            # Dans etmeyi önlemek için 'expanded=False' yapıyoruz. 
+            # Böylece sayfa yenilenince zorla yukarı kaydırmaz.
+            is_first_item = (index == 0)
+            
+            with st.expander(expander_label, expanded=is_first_item):
                 
                 # --- SOL TARAFTAKİ DETAY BİLGİLERİ ---
-                # Sütunları ayırmadan alt alta ve bold yazıyoruz
-                
-                # 1. Tam Adres (BOLD)
                 st.markdown(f"**📍 Şantiye Açık Adres:** {site.address if site.address else 'Belirtilmemiş'}")
-                
-                # 2. Yarıçap (BOLD) - Hemen altında
                 st.markdown(f"**📏 Şantiye Yarıçapı: {site.radius_meters}m**")
                 
-                # 3. Tarih (Gri ve küçük)
                 created_str = format_date_for_ui(site.created_at, user.timezone) if site.created_at else "Bilinmiyor"
                 st.caption(f"📅 Şantiye Oluşturulma Tarihi: {created_str}")
 
-                # --- SIKIŞIK SEPERATÖR ---
-                # st.markdown("---") yerine HTML ile margin'i alınmış çizgi çekiyoruz
                 st.markdown("<hr style='margin-top: 5px; margin-bottom: 15px;'>", unsafe_allow_html=True)
 
                 c_devices, c_actions = st.columns([1.5, 1])
                 
                 # --- SOL: CİHAZ YÖNETİMİ ---
                 with c_devices:
-                    st.markdown("**🚜 Makine Listesi**")
-                    assigned_ids = [d.device_id for d in site.devices]
+                    st.markdown("**🚜 Makine Listesi (Sadece Takip Cihazlı)**")
                     
+                    assigned_ids = [d.device_id for d in site.devices]
                     df_data = []
-                    for dev in all_devices:
+                    
+                    # Sadece IoT Cihazlarını Listele (devices filtresi yukarıda yapıldı)
+                    for dev in devices:
                         df_data.append({
                             "Seç": dev.device_id in assigned_ids,
                             "Makine Modeli": dev.unit_name, 
                             "ID": dev.device_id 
                         })
                     
-                    df = pd.DataFrame(df_data)
-                    
-                    edited_df = st.data_editor(
-                        df,
-                        column_config={
-                            "Seç": st.column_config.CheckboxColumn("Ekle", width="small", default=False),
-                            "Makine Modeli": st.column_config.TextColumn("Makine Modeli", width="medium", disabled=True),
-                            "ID": None
-                        },
-                        hide_index=True,
-                        key=f"editor_{site.site_id}",
-                        height=150
-                    )
-                    
-                    if st.button("💾 Listeyi Güncelle", key=f"btn_save_{site.site_id}", use_container_width=True):
-                        selected_rows = edited_df[edited_df["Seç"] == True]
-                        new_selected_ids = selected_rows["ID"].tolist()
+                    if not df_data:
+                        st.warning("Hiç takip cihazlı makine bulunamadı.")
+                    else:
+                        df = pd.DataFrame(df_data)
                         
-                        from backend.database import update_geosite_devices
-                        with st.spinner("Sunucu güncelleniyor..."):
-                            update_geosite_devices(site.site_id, new_selected_ids)
+                        # Tabloyu Çiz
+                        edited_df = st.data_editor(
+                            df,
+                            column_config={
+                                "Seç": st.column_config.CheckboxColumn("Ekle", width="small", default=False),
+                                "Makine Modeli": st.column_config.TextColumn("Makine Modeli", width="medium", disabled=True),
+                                "ID": None
+                            },
+                            hide_index=True,
+                            key=f"editor_{site.site_id}",
+                            height=150
+                        )
                         
-                        st.toast("Makine listesi güncellendi!", icon="✅")
-                        time.sleep(1)
-                        st.rerun()
+                        if st.button("💾 Listeyi Güncelle", key=f"btn_save_{site.site_id}", use_container_width=True):
+                            selected_rows = edited_df[edited_df["Seç"] == True]
+                            new_selected_ids = selected_rows["ID"].tolist()
+                            
+                            from backend.database import update_geosite_devices
+                            with st.spinner("Sunucu güncelleniyor..."):
+                                update_geosite_devices(site.site_id, new_selected_ids)
+                            
+                            st.toast("Makine listesi güncellendi!", icon="✅")
+                            time.sleep(1)
+                            st.rerun()
 
-                # --- SAĞ: AKSİYONLAR ---
+                # --- SAĞ: AKSİYONLAR (DIALOG KULLANAN VERSİYON) ---
                 with c_actions:
                     st.markdown("**⚙️ Aksiyonlar**")
                     
-                    # Alarm
+                    # 1. Alarm Toggle
+                    alarm_key = f"al_main_{site.site_id}"
                     alarm_val = getattr(site, 'auto_enable_alarms', True)
-                    new_alarm_val = st.toggle("🚨 Bölge İhlal Alarmı", value=alarm_val, key=f"al_main_{site.site_id}")
+                    
+                    new_alarm_val = st.toggle("🚨 Bölge İhlal Alarmı", value=alarm_val, key=alarm_key)
                     
                     if new_alarm_val != alarm_val:
                         from backend.database import toggle_geosite_alarm_status
                         toggle_geosite_alarm_status(site.site_id, new_alarm_val)
-                        status = "Aktif" if new_alarm_val else "Pasif"
-                        st.toast(f"Alarm: {status}", icon="🔔")
-                        time.sleep(1)
+                        st.toast(f"Alarm güncellendi", icon="🔔")
+                        time.sleep(0.5)
                         st.rerun()
 
                     st.write("") 
-                    st.write("") 
                     
-                    # --- GÜVENLİ SİLME MEKANİZMASI ---
-                    c_edit, c_del = st.columns(2)
+                    # 2. Butonlar (Yan Yana)
+                    b_edit, b_del = st.columns(2)
                     
-                    # Düzenle Butonu
-                    if c_edit.button("✏️ Düzenle", key=f"edt_{site.site_id}", use_container_width=True):
-                        st.session_state.page_mode = 'edit'
-                        st.session_state.edit_site_id = site.site_id
-                        st.session_state.form_name = site.name
-                        st.session_state.form_addr = site.address
-                        st.session_state.current_radius = site.radius_meters
-                        st.session_state.map_center = [site.latitude, site.longitude]
-                        st.rerun()
-                    
-                    # Silme Butonu (Toggle Mantığı)
-                    # Her kartın kendi "Silme Modu" state'i olsun
-                    del_mode_key = f"del_confirm_{site.site_id}"
-                    if del_mode_key not in st.session_state:
-                        st.session_state[del_mode_key] = False
-
-                    if not st.session_state[del_mode_key]:
-                        # İlk aşama: Basınca Onay Moduna geç
-                        if c_del.button("🗑️ Sil", key=f"pre_del_{site.site_id}", use_container_width=True):
-                            st.session_state[del_mode_key] = True
+                    with b_edit:
+                        if st.button("✏️ Düzenle", key=f"edt_{site.site_id}", use_container_width=True):
+                            st.session_state.page_mode = 'edit'
+                            st.session_state.edit_site_id = site.site_id
+                            st.session_state.form_name = site.name
+                            st.session_state.form_addr = site.address
+                            st.session_state.current_radius = site.radius_meters
+                            st.session_state.map_center = [site.latitude, site.longitude]
                             st.rerun()
-                    else:
-                        # İkinci aşama: Onay veya İptal
-                        c_del.empty() # Eski butonu sil
-                        col_yes, col_no = st.columns(2)
-                        if col_yes.button("✅ Evet", key=f"yes_{site.site_id}", type="primary", use_container_width=True):
-                            delete_geosite(site.site_id)
-                            st.toast(f"Şantiye silindi.", icon="🗑️")
-                            del st.session_state[del_mode_key] # State temizle
-                            time.sleep(1)
-                            st.rerun()
-                        
-                        if col_no.button("❌ İptal", key=f"no_{site.site_id}", use_container_width=True):
-                            st.session_state[del_mode_key] = False # İptal et
-                            st.rerun()
+                            
+                    with b_del:
+                        # DIALOG PENCERESİ AÇAR (Sayfa Dans Etmez)
+                        if st.button("🗑️ Sil", key=f"del_diag_{site.site_id}", use_container_width=True):
+                            show_delete_dialog(site.site_id, site.name)
 
 # ==========================================
 # 2. EDİTÖR GÖRÜNÜMÜ (HARİTA VE FORM)
@@ -288,7 +299,7 @@ def render_editor_view(user):
         
         if new_lat != curr_lat or new_lon != curr_lon:
             st.session_state.map_center = [new_lat, new_lon]
-            # --- YENİ EKLENEN SATIR: Adresi de güncelle ---
+            # Adresi de güncelle
             st.session_state.form_addr = get_address_from_coords(new_lat, new_lon)
             st.rerun()
 
@@ -345,15 +356,10 @@ def render_editor_view(user):
             st.session_state.current_radius = val_manual
             st.rerun()
 
-        # --- GELİŞMİŞ AYARLAR (STATE SENKRONİZASYONU) ---
-        # 1. Varsayılan Değerler (Yeni oluşturma için)
+        # --- GELİŞMİŞ AYARLAR ---
         s_alarms = True
         s_all_devs = True 
         
-        # 2. Eğer Düzenleme Modundaysak (is_edit=True)
-        # Checkbox'ları ekranda göstermesek bile, veritabanındaki mevcut değerleri 
-        # 's_alarms' ve 's_all_devs' değişkenlerine atamalıyız.
-        # Böylece aşağıda 'Kaydet' butonuna bastığında eski ayarlar silinmez.
         if is_edit:
             my_sites = get_user_geosites(user.id)
             target_site = next((s for s in my_sites if s.site_id == st.session_state.edit_site_id), None)
@@ -361,10 +367,8 @@ def render_editor_view(user):
                 s_alarms = target_site.auto_enable_alarms
                 s_all_devs = target_site.apply_to_all_devices
 
-        # 3. UI Gösterimi (Sadece YENİ oluştururken)
         if not is_edit:
             with st.expander("⚙️ Gelişmiş Ayarlar", expanded=True):
-                # Burada s_alarms ve s_all_devs değişkenleri güncellenir
                 s_alarms = st.checkbox("Bölge İhlal Alarmını Aktif Et", value=s_alarms)
                 s_all_devs = st.checkbox("Tüm cihazlara otomatik uygula", value=s_all_devs)
                 st.caption("Not: Bir cihaz birden fazla şantiyeye kayıt edilebilir.")
@@ -381,9 +385,8 @@ def render_editor_view(user):
                 final_lon = st.session_state.map_center[1]
                 final_rad = st.session_state.current_radius
                 
-                # Parametreleri topla
                 adv_settings = {
-                    "auto_enable_alarms": s_alarms,          # Çıkış
+                    "auto_enable_alarms": s_alarms,
                     "apply_to_all_devices": s_all_devs
                 }
 
@@ -402,31 +405,18 @@ def render_editor_view(user):
     with col_map_area:
         lat, lon = st.session_state.map_center
         
-        # HARİTA AYARLARI: OpenStreetMap YOK, DoubleClickZoom KAPALI
+        # HARİTA AYARLARI
         m = folium.Map(
             location=[lat, lon], 
             zoom_start=15, 
             control_scale=True, 
             double_click_zoom=False,
-            tiles=None  # Default OSM'yi engelle
+            tiles=None 
         )
         
-        # Sadece Google Katmanları
-        folium.TileLayer(
-            tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}',
-            attr='Google',
-            name='Google Uydu (Hibrit)',
-            overlay=False,
-            control=True
-        ).add_to(m)
-
-        folium.TileLayer(
-            tiles='https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}',
-            attr='Google',
-            name='Google Sokak',
-            overlay=False,
-            control=True
-        ).add_to(m)
+        # Google Katmanları
+        folium.TileLayer('https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', attr='Google', name='Google Uydu (Hibrit)', overlay=False, control=True).add_to(m)
+        folium.TileLayer('https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}', attr='Google', name='Google Sokak', overlay=False, control=True).add_to(m)
 
         folium.LayerControl().add_to(m)
 
@@ -438,7 +428,7 @@ def render_editor_view(user):
             tooltip=f"{lat:.5f}, {lon:.5f}"
         ).add_to(m)
 
-        # Yarıçap Dairesi (Interactive=False ve Popup yok -> Tıklama içinden geçer)
+        # Yarıçap Dairesi
         folium.Circle(
             location=[lat, lon],
             radius=st.session_state.current_radius,
@@ -447,7 +437,6 @@ def render_editor_view(user):
             fill=True,
             fill_opacity=0.2,
             interactive=False 
-            # popup parametresini sildik, artık tıklamayı engellemez
         ).add_to(m)
 
         map_data = st_folium(m, height=700, width="100%")

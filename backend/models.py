@@ -45,6 +45,13 @@ class User(Base):
     password_hash = Column(String, nullable=False)
     role = Column(String, default='Client')
     trusted_group_id = Column(Integer, nullable=True) # Örn: 9840 veya 7153
+    is_active = Column(Boolean, default=True)  # Kullanıcıyı silmeden pasife almak için
+    allowed_pages = Column(String, nullable=True)      # Alt kullanıcı yetkileri
+    allowed_device_ids = Column(String, nullable=True) # Alt kullanıcı cihazları
+    admin_note = Column(String, nullable=True)        # Senin özel notun
+    subscription_end_date = Column(DateTime, nullable=True) # Lisans bitiş tarihi
+    device_limit = Column(Integer, default=100)       # Cihaz ekleme kotası
+    last_login_at = Column(DateTime, nullable=True)   # Son görülme
     
     # Profil Bilgileri
     company_name = Column(String)
@@ -95,6 +102,8 @@ class Device(Base):
     address = Column(String, default="Konum Yok") 
     icon_type = Column(String, default="truck")
     is_active = Column(Boolean, default=True)
+    is_virtual = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow) # Sıralama için gerekli
 
     # İnce Ayarlar
     initial_hours_offset = Column(Float, default=0.0)
@@ -122,6 +131,7 @@ class Device(Base):
     alarms = relationship("AlarmEvent", back_populates="device")
     # Şantiyelerle İlişki (Many-to-Many)
     geosites = relationship("GeoSite", secondary=device_geosite_association, back_populates="devices")
+    documents = relationship("DeviceDocument", back_populates="device", cascade="all, delete-orphan")
 
 # ---------------------------------------------------------
 # 4. LOGLAR
@@ -266,3 +276,24 @@ class Setting(Base):
     key = Column(String, primary_key=True)   # Örn: 'work_hours'
     value = Column(String, nullable=False)   # Örn: '{"start": "08:00", "end": "18:00"}' (JSON)
     description = Column(String)             # Örn: 'Şirket genel mesai saatleri'
+
+# ---------------------------------------------------------
+# 7. DOKÜMAN YÖNETİMİ (YENİ)
+# ---------------------------------------------------------
+class DeviceDocument(Base):
+    __tablename__ = 'device_documents'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    device_id = Column(String, ForeignKey('devices.device_id'))
+    
+    # Dosya Bilgileri
+    file_name = Column(String, nullable=False)  # Örn: "2026_Bakim_Formu.pdf" (Ekranda görünen ad)
+    file_path = Column(String, nullable=False)  # Örn: "static/documents/HKM-001/fatura.pdf" (Sunucu yolu)
+    file_type = Column(String)                  # Örn: "Invoice", "Manual", "ServiceForm", "SpareParts"
+    
+    # Yükleme Bilgisi
+    upload_date = Column(DateTime, default=datetime.utcnow)
+    uploaded_by = Column(String, nullable=True) # Hangi admin yükledi? (Opsiyonel)
+    
+    # İlişki
+    device = relationship("Device", back_populates="documents")

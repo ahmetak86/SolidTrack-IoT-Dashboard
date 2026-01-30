@@ -104,8 +104,10 @@ def load_view(user):
         st.session_state.map_route_data = None 
 
     all_devices = get_user_devices(user.id)
+    if all_devices:
+        all_devices = [d for d in all_devices if not d.is_virtual]
     if not all_devices:
-        st.warning("Kayıtlı cihaz yok.")
+        st.warning("Kayıtlı ve aktif takip cihazı bulunamadı.")
         return
 
     # --- FİLTRELER ---

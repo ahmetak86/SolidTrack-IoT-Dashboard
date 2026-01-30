@@ -266,6 +266,7 @@ def load_view(user):
 
     # 1. CİHAZ VE FİLTRELER
     devices = get_user_devices(user.id)
+    devices = [d for d in devices if not d.is_virtual]
     if not devices:
         st.warning("Cihaz bulunamadı.")
         return

@@ -1,6 +1,9 @@
 # backend/database.py (FİNAL TEMİZLENMİŞ & HATA KORUMALI SÜRÜM)
+import requests
+import json
 import os
 import uuid
+import shutil
 from datetime import datetime, timedelta
 from sqlalchemy import create_engine, or_, func
 from sqlalchemy.orm import sessionmaker, joinedload
@@ -332,38 +335,43 @@ def delete_geosite(site_id):
 def get_user_geosites(user_id):
     """
     Kullanıcının görebileceği şantiyeleri getirir.
-    1. Kendi oluşturdukları.
-    2. Görmeye yetkili olduğu cihazlara atanmış olanlar (Read-Only).
+    GÜNCELLEME: 'joinedload' eklenerek DetachedInstanceError hatası giderildi.
     """
     db = SessionLocal()
     try:
         user = db.query(User).filter(User.id == user_id).first()
         if not user: return []
 
-        # A. Admin ise hepsini görsün
+        # A. Admin ise hepsini görsün (Burada zaten joinedload vardı, koruduk)
         if user.role == "Admin":
             return db.query(GeoSite).options(joinedload(GeoSite.devices)).all()
 
         # B. Normal Kullanıcı (Müşteri)
+        
         # 1. Kendi oluşturdukları (Owner ID eşleşenler)
-        own_sites = db.query(GeoSite).filter(GeoSite.owner_id == user_id).all()
+        # DEĞİŞİKLİK BURADA: .options(joinedload(GeoSite.devices)) eklendi
+        own_sites = db.query(GeoSite).options(joinedload(GeoSite.devices))\
+                      .filter(GeoSite.owner_id == user_id).all()
 
         # 2. Cihazlarına atanmış başkasının (Adminin) şantiyeleri
-        # Önce kullanıcının cihazlarını bul
         user_devices = get_user_devices(user_id)
         device_ids = [d.device_id for d in user_devices]
         
-        # Bu cihazlara bağlı olan şantiyeleri bul
         inherited_sites = []
         if device_ids:
-            inherited_sites = db.query(GeoSite).join(GeoSite.devices)\
+            # DEĞİŞİKLİK BURADA: .options(joinedload(GeoSite.devices)) eklendi
+            inherited_sites = db.query(GeoSite).options(joinedload(GeoSite.devices))\
+                                .join(GeoSite.devices)\
                                 .filter(Device.device_id.in_(device_ids))\
-                                .filter(GeoSite.owner_id != user_id).all() # Zaten kendisininkileri aldık
+                                .filter(GeoSite.owner_id != user_id).all()
 
         # Listeleri birleştir (Tekrarları önlemek için set kullan)
         all_sites = list(set(own_sites + inherited_sites))
         
         return all_sites
+    except Exception as e:
+        print(f"Şantiye Getirme Hatası: {e}")
+        return []
     finally:
         db.close()
 
@@ -718,5 +726,431 @@ def reset_password_by_token(token, new_password):
         return True, "✅ Şifreniz başarıyla sıfırlandı. Giriş yapabilirsiniz."
     except Exception as e:
         return False, str(e)
+    finally:
+        db.close()
+
+# ---------------------------------------------------------
+# DOKÜMAN VE SANAL CİHAZ YÖNETİMİ
+# ---------------------------------------------------------
+
+def create_virtual_device_in_db(owner_id, unit_name, model, custom_serial=None):
+    """
+    Takip cihazı olmayan 'Tip B' müşterileri için Sanal Varlık oluşturur.
+    HATA DÜZELTMESİ: Artık nesne yerine direkt device_id string'i dönüyor.
+    """
+    db = SessionLocal()
+    try:
+        if not custom_serial:
+            import time
+            custom_serial = f"VIRTUAL_{int(time.time())}"
+        
+        existing = db.query(Device).filter(Device.device_id == custom_serial).first()
+        if existing:
+            return None, "❌ Bu Seri No zaten kullanılıyor."
+
+        new_device = Device(
+            device_id=custom_serial,
+            owner_id=owner_id,
+            unit_name=unit_name,
+            asset_model=model,
+            icon_type="excavator",
+            is_active=True,
+            is_virtual=True,
+            address="Kayıtlı Konum Yok (Sanal)"
+        )
+        
+        db.add(new_device)
+        db.commit()
+        
+        # ID'yi bir değişkene alıp öyle dönelim ki session kapansa da veri elimizde kalsın
+        created_id = str(new_device.device_id)
+        
+        return created_id, "✅ Sanal makine başarıyla oluşturuldu."
+    except Exception as e:
+        db.rollback()
+        return None, str(e)
+    finally:
+        db.close()
+
+def upload_document_to_db(device_id, uploaded_file, doc_type, uploaded_by_user):
+    """
+    Streamlit'ten gelen dosyayı 'static/documents/...' klasörüne kaydeder
+    ve veritabanına yolunu yazar.
+    """
+    db = SessionLocal()
+    try:
+        # 1. Cihazı bul
+        device = db.query(Device).filter(Device.device_id == device_id).first()
+        if not device: return False, "Cihaz bulunamadı."
+
+        # 2. Klasör Yapısı: static/documents/{device_id}/
+        base_dir = "static/documents"
+        device_dir = os.path.join(base_dir, str(device_id))
+        
+        if not os.path.exists(device_dir):
+            os.makedirs(device_dir) # Klasör yoksa oluştur
+
+        # 3. Dosyayı Kaydet
+        # Dosya adını güvenli hale getir (Türkçe karakter vb. sorun olmasın)
+        safe_filename = uploaded_file.name.replace(" ", "_")
+        file_path = os.path.join(device_dir, safe_filename)
+        
+        with open(file_path, "wb") as f:
+            f.write(uploaded_file.getbuffer())
+
+        # 4. Veritabanına Yaz
+        from backend.models import DeviceDocument
+        
+        new_doc = DeviceDocument(
+            device_id=device_id,
+            file_name=uploaded_file.name, # Ekranda görünecek orijinal isim
+            file_path=file_path,          # Sunucudaki yol
+            file_type=doc_type,           # Fatura, Katalog vs.
+            uploaded_by=uploaded_by_user
+        )
+        
+        db.add(new_doc)
+        db.commit()
+        return True, "✅ Dosya başarıyla yüklendi ve arşivlendi."
+        
+    except Exception as e:
+        db.rollback()
+        return False, str(e)
+    finally:
+        db.close()
+
+def get_device_documents(device_id):
+    """Bir cihaza ait tüm dokümanları listeler."""
+    db = SessionLocal()
+    from backend.models import DeviceDocument
+    docs = db.query(DeviceDocument).filter(DeviceDocument.device_id == device_id).order_by(DeviceDocument.upload_date.desc()).all()
+    db.close()
+    return docs
+
+def delete_document(doc_id):
+    """Dokümanı hem DB'den hem diskten siler."""
+    db = SessionLocal()
+    from backend.models import DeviceDocument
+    try:
+        doc = db.query(DeviceDocument).filter(DeviceDocument.id == doc_id).first()
+        if doc:
+            # Diskten sil
+            if os.path.exists(doc.file_path):
+                os.remove(doc.file_path)
+            
+            # DB'den sil
+            db.delete(doc)
+            db.commit()
+            return True, "Silindi."
+        return False, "Bulunamadı."
+    except Exception as e:
+        return False, str(e)
+    finally:
+        db.close()
+
+def get_user_storage_usage(user_id):
+    """
+    Kullanıcının yüklediği toplam dosya boyutunu (MB) hesaplar.
+    """
+    db = SessionLocal()
+    total_size_bytes = 0
+    try:
+        # Kullanıcının cihazlarını bul
+        user_devices = db.query(Device).filter(Device.owner_id == user_id).all()
+        device_ids = [d.device_id for d in user_devices]
+        
+        # Bu cihazlara ait dokümanları bul
+        # (Burada iyileştirme: Normalde 'uploaded_by' user.username olmalı ama 
+        # şimdilik kullanıcının cihazındaki tüm dosyalar kotadan sayılmasın, 
+        # sadece kendi yükledikleri sayılsın istiyorsan 'uploaded_by' filtresi eklemeliyiz.
+        # Basitlik için: Kullanıcının cihaz klasöründeki her şey kotaya dahil edilebilir veya
+        # sadece kendi yükledikleri. Şimdilik admin yükledikleri kotadan yemesin diyelim.)
+        
+        # User objesini bulalım ki username'i alalım
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user: return 0
+        
+        from backend.models import DeviceDocument
+        # Sadece bu kullanıcının yüklediği dosyaları say
+        docs = db.query(DeviceDocument).filter(
+            DeviceDocument.device_id.in_(device_ids),
+            DeviceDocument.uploaded_by == user.username
+        ).all()
+        
+        for doc in docs:
+            if os.path.exists(doc.file_path):
+                total_size_bytes += os.path.getsize(doc.file_path)
+                
+        return total_size_bytes / (1024 * 1024) # MB cinsinden dön
+    except Exception as e:
+        print(f"Kota hatası: {e}")
+        return 0
+    finally:
+        db.close()
+
+def send_admin_notification_email(doc_type, device_name, user_name, user_note=""):
+    """
+    Kullanıcı dosya yükleyince Admine E-Posta atar (Simülasyon).
+    Gerçek SMTP ayarları yapılana kadar terminale basar.
+    """
+    print("------------------------------------------------")
+    print(f"📧 [EMAIL GÖNDERİLDİ] Kime: admin@hkm.com.tr")
+    print(f"Konu: Yeni Dosya Yüklendi - {user_name}")
+    print(f"Mesaj: {user_name}, {device_name} cihazına bir '{doc_type}' yükledi.")
+    if user_note:
+        print(f"Kullanıcı Notu: {user_note}")
+    print("------------------------------------------------")
+    # İleride buraya smtplib kodlarını ekleyeceğiz.
+    return True
+
+def convert_virtual_to_real(virtual_device_id, real_iot_id):
+    """
+    Sanal bir cihazı, gerçek bir IoT cihazına dönüştürür veya birleştirir.
+    Dosyaları, Paylaşım Linklerini ve Şantiye atamalarını korur.
+    """
+    db = SessionLocal()
+    try:
+        # 1. Sanal Cihazı Bul
+        virtual_dev = db.query(Device).filter(Device.device_id == virtual_device_id).first()
+        if not virtual_dev:
+            return False, "Sanal cihaz bulunamadı."
+        
+        if not virtual_dev.is_virtual:
+            return False, "Seçilen cihaz zaten gerçek bir cihaz (Sanal değil)."
+
+        # 2. Gerçek Cihaz Zaten Var mı? (Sync ile gelmiş olabilir)
+        real_dev = db.query(Device).filter(Device.device_id == real_iot_id).first()
+
+        # --- SENARYO A: Gerçek Cihaz Zaten Listede Var (MERGE İŞLEMİ) ---
+        if real_dev:
+            # 2a. Dosyaları Taşı
+            from backend.models import DeviceDocument, ShareLink # Model importları
+            
+            docs = db.query(DeviceDocument).filter(DeviceDocument.device_id == virtual_device_id).all()
+            for doc in docs:
+                doc.device_id = real_iot_id # Sahibi değiştir
+            
+            # 2b. Paylaşım Linklerini Taşı
+            links = db.query(ShareLink).filter(ShareLink.device_id == virtual_device_id).all()
+            for link in links:
+                link.device_id = real_iot_id # Sahibi değiştir
+            
+            # 2c. Sanal Cihazı Sil (Artık her şey gerçeğe geçti)
+            db.delete(virtual_dev)
+            db.commit()
+            return True, f"Başarılı! Sanal cihaz verileri '{real_dev.unit_name}' ile birleştirildi."
+
+        # --- SENARYO B: Gerçek Cihaz Yok (DÖNÜŞTÜRME İŞLEMİ) ---
+        else:
+            # ID'yi güncellemek Primary Key olduğu için risklidir. 
+            # SQL Alchemy'de cascade yoksa manuel yeni kayıt açıp eskileri taşımak en temizidir.
+            
+            # Yeni Cihaz Yarat (Gerçek olarak)
+            new_real_dev = Device(
+                device_id=real_iot_id,
+                owner_id=virtual_dev.owner_id,
+                unit_name=virtual_dev.unit_name, # İsim aynı kalsın
+                asset_model=virtual_dev.asset_model,
+                is_virtual=False, # ARTIK GERÇEK
+                is_active=True,
+                created_at=virtual_dev.created_at
+            )
+            db.add(new_real_dev)
+            db.flush() # ID oluşsun diye flush
+            
+            # Varlıkları Taşı
+            from backend.models import DeviceDocument, ShareLink
+            
+            docs = db.query(DeviceDocument).filter(DeviceDocument.device_id == virtual_device_id).all()
+            for doc in docs:
+                doc.device_id = real_iot_id
+                
+            links = db.query(ShareLink).filter(ShareLink.device_id == virtual_device_id).all()
+            for link in links:
+                link.device_id = real_iot_id
+                
+            # Eskiyi Sil
+            db.delete(virtual_dev)
+            db.commit()
+            return True, f"Başarılı! Cihaz ID'si {real_iot_id} olarak güncellendi ve IoT moduna alındı."
+
+    except Exception as e:
+        db.rollback()
+        return False, f"Hata oluştu: {str(e)}"
+    finally:
+        db.close()
+
+# =========================================================
+# TRUSTED API ENTEGRASYONU (GERÇEK BAĞLANTI)
+# =========================================================
+
+# --- API AYARLARI (BUNLARI DOLDUR) ---
+API_BASE_URL = "https://api.trusted.dk/api" # Örnek: Dokümandaki gerçek URL
+API_USERNAME = "s.ozsarac@hkm.com.tr"          # API Kullanıcı Adı
+API_PASSWORD = "Solid_2023"                  # API Şifresi
+
+def get_trusted_api_token():
+    """
+    API'ye giriş yapıp geçici erişim anahtarını (Bearer Token) alır.
+    """
+    try:
+        # Token adresi (trusted_api.py referans alınarak)
+        token_url = "https://api.trusted.dk/Token"
+        
+        # Form verisi olarak gönderilmeli (x-www-form-urlencoded)
+        payload = {
+            "grant_type": "password",
+            "username": API_USERNAME,
+            "password": API_PASSWORD
+        }
+        
+        # Header bilgisi
+        headers = {"Content-Type": "application/x-www-form-urlencoded"}
+        
+        print("🔑 API Token İsteniyor...")
+        response = requests.post(token_url, data=payload, headers=headers, timeout=15)
+        
+        if response.status_code == 200:
+            token = response.json().get("access_token")
+            print("✅ Token Alındı.")
+            return token
+        else:
+            print(f"❌ Token Hatası: {response.status_code} - {response.text}")
+            return None
+    except Exception as e:
+        print(f"❌ Token Bağlantı Hatası: {e}")
+        return None
+
+# backend/database.py İÇİNDEKİ İLGİLİ FONKSİYONLARI BUNLARLA DEĞİŞTİR:
+
+def sync_devices_from_trusted_api(group_id, target_user_id):
+    """
+    GELİŞMİŞ SYNC (V4):
+    1. API'den cihazları çeker.
+    2. Yeni cihazları ekler, var olanları günceller.
+    3. KRİTİK: API listesinde OLMAYAN ama User'da görünen cihazları boşa çıkarır (Temizlik).
+    """
+    db = SessionLocal()
+    added_count = 0
+    updated_count = 0
+    removed_count = 0
+    
+    try:
+        # 1. TOKEN AL
+        token = get_trusted_api_token()
+        if not token:
+            return False, "API Giriş Hatası: Token alınamadı."
+
+        print(f"🌍 Sync Başlıyor... Grup ID: {group_id}")
+        
+        # 2. URL HAZIRLA
+        base = API_BASE_URL.rstrip("/").rstrip("/api") 
+        endpoint = f"{base}/api/Units/Group"
+        
+        params = {"groupId": int(group_id), "Take": 10000, "Skip": 0}
+        headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+        
+        response = requests.get(endpoint, params=params, headers=headers, timeout=20)
+        
+        if response.status_code != 200:
+            return False, f"API Hatası ({response.status_code}): {response.text[:100]}"
+            
+        api_devices = response.json() 
+        if not isinstance(api_devices, list): api_devices = []
+
+        # API'den gelen Seri Numaralarını bir listede tutalım (Temizlik kontrolü için)
+        api_serial_numbers = []
+
+        # 3. VERİTABANINA İŞLEME (EKLEME & GÜNCELLEME)
+        for item in api_devices:
+            dev_id = str(item.get("SerialNumber"))
+            
+            # Listeye ekle (string olarak)
+            if dev_id and dev_id != "None":
+                api_serial_numbers.append(dev_id)
+            else:
+                continue
+
+            dev_name = item.get("UnitName")
+            if not dev_name or dev_name == "null": dev_name = f"Cihaz {dev_id}"
+            dev_model = item.get("ProductTypeName", "T7LTE")
+            
+            # DB Kontrol
+            existing_dev = db.query(Device).filter(Device.device_id == dev_id).first()
+            
+            if existing_dev:
+                # Cihaz zaten varsa ve sahibi biz değilsek veya pasifse güncelle
+                if existing_dev.owner_id != target_user_id or not existing_dev.is_active:
+                    existing_dev.owner_id = target_user_id
+                    existing_dev.is_active = True
+                    updated_count += 1
+            else:
+                # Yoksa yeni oluştur
+                new_dev = Device(
+                    device_id=dev_id, owner_id=target_user_id, unit_name=dev_name,
+                    asset_model=dev_model, is_active=True, is_virtual=False,
+                    icon_type="truck", created_at=datetime.utcnow()
+                )
+                db.add(new_dev)
+                added_count += 1
+        
+        # 4. TEMİZLİK OPERASYONU (CLEANUP)
+        # Bu kullanıcıya zimmetli olan ama API'den gelen listede OLMAYAN cihazları bul
+        # Not: device_id string olduğu için karşılaştırma güvenlidir.
+        if api_serial_numbers:
+            stale_devices = db.query(Device).filter(
+                Device.owner_id == target_user_id,
+                Device.device_id.notin_(api_serial_numbers)
+            ).all()
+            
+            for stale in stale_devices:
+                stale.owner_id = None  # Kullanıcıdan düşür
+                stale.is_active = False # Pasife çek
+                removed_count += 1
+
+        db.commit()
+        
+        summary = f"✅ Sync Tamamlandı:\n➕ {added_count} Yeni Eklendi\n🔄 {updated_count} Güncellendi\n🗑️ {removed_count} Eski Cihaz Kaldırıldı."
+        return True, summary
+
+    except Exception as e:
+        db.rollback()
+        print(f"KRİTİK HATA: {e}")
+        return False, f"Sistem Hatası: {str(e)}"
+    finally:
+        db.close()
+
+
+def update_user_admin_details(user_id, updates):
+    """
+    Admin panelinden gelen güncellemeleri işler.
+    V4 GÜNCELLEMESİ: Artık 'role' değişikliğini de destekliyor.
+    """
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            return False, "Kullanıcı bulunamadı."
+        
+        # CRM Verileri
+        if "admin_note" in updates: user.admin_note = updates["admin_note"]
+        if "device_limit" in updates: user.device_limit = int(updates["device_limit"])
+        if "is_active" in updates: user.is_active = updates["is_active"]
+        if "trusted_group_id" in updates: user.trusted_group_id = int(updates["trusted_group_id"])
+        
+        # --- YENİ: ROL GÜNCELLEME ---
+        if "role" in updates: 
+            user.role = updates["role"]
+        # ----------------------------
+        
+        # Tarih
+        if "subscription_end_date" in updates:
+            user.subscription_end_date = updates["subscription_end_date"]
+
+        db.commit()
+        return True, "✅ Müşteri bilgileri güncellendi."
+    except Exception as e:
+        db.rollback()
+        return False, f"Hata: {str(e)}"
     finally:
         db.close()

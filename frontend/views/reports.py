@@ -104,6 +104,7 @@ def load_view(user):
 
     # Cihazları Getir (Yetkiye Göre)
     devices = get_all_devices_for_admin() if user.role == 'Admin' else get_user_devices(user.id)
+    devices = [d for d in devices if not d.is_virtual]
     if not devices:
         st.warning("Raporlanacak cihaz bulunamadı.")
         return

@@ -14,6 +14,7 @@ from frontend.utils import convert_to_user_time # Saat çevirici
 def load_view(user):
     st.title("🔍 Makine Sağlık Raporu")
     devices = get_user_devices(user.id)
+    devices = [d for d in devices if not d.is_virtual]
     
     if devices:
         selected_name = st.selectbox("Analiz Edilecek Makine:", [d.unit_name for d in devices])

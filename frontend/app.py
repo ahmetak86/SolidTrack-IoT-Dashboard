@@ -13,7 +13,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from views import (
     dashboard, map, inventory, alarms, geofence, 
     settings, reports, ai_analysis, solid_ai, utilization_view,
-    admin_users
+    admin_users, admin_documents
 )
 
 # --- BACKEND IMPORTLARI ---
@@ -227,95 +227,119 @@ query_params = st.query_params
 if "token" in query_params:
     token = query_params["token"]
     
+    # Gerekli Importlar
+    from backend.database import get_active_share_link, get_last_operation_stats, get_device_telemetry
+    from frontend.utils import format_date_for_ui
+    # Geopy kütüphanesi (Adres Çözümleme için)
+    try:
+        from geopy.geocoders import Nominatim
+    except ImportError:
+        st.error("Sistem Hatası: 'geopy' kütüphanesi yüklü değil. Terminale 'pip install geopy' yazınız.")
+        st.stop()
+    
     shared_device = get_active_share_link(token)
     
     if shared_device:
-        stats = get_last_operation_stats(shared_device.device_id)
+        telemetry = get_device_telemetry(shared_device.device_id, limit=1)
         
-        # --- MİSAFİR GÖRÜNÜMÜ ---
-        
-        # 1. BAŞLIK (Sadece Sol Taraf)
+        # --- BAŞLIK ---
         st.title(f"{shared_device.unit_name}")
-        st.caption(f"Model: {shared_device.asset_model} | Seri No: {shared_device.device_id}")
+        st.caption(f"Seri No: {shared_device.device_id}")
 
-        # 2. ANA İÇERİK (Harita ve Bilgi Paneli)
+        # --- İKİ KOLONLU DÜZEN ---
         col_map, col_info = st.columns([2.5, 1])
         
+        # 1. SOL TARAF (HARİTA)
         with col_map:
-            # Harita
-            telemetry = get_device_telemetry(shared_device.device_id, limit=1)
             if telemetry:
                 last_loc = [telemetry[0].latitude, telemetry[0].longitude]
-                m = folium.Map(location=last_loc, zoom_start=15)
                 
-                # --- DEVASA KIRMIZI İKON (fa-2x) ---
-                folium.Marker(
-                    last_loc, 
-                    popup=shared_device.unit_name,
-                    icon=folium.Icon(color="red", icon="truck fa-2x", prefix="fa")
-                ).add_to(m)
+                m = folium.Map(location=last_loc, zoom_start=15, tiles=None)
                 
+                # Katmanlar
+                folium.TileLayer('https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}&hl=tr', attr='Google', name='Uydu', overlay=False, control=True, show=True).add_to(m)
+                folium.TileLayer('https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}&hl=tr', attr='Google', name='Sokak', overlay=False, control=True, show=False).add_to(m)
+                
+                # İkon
+                folium.Marker(last_loc, popup=shared_device.unit_name, icon=folium.Icon(color="red", icon="truck fa-2x", prefix="fa")).add_to(m)
+                
+                folium.LayerControl(position='topright', collapsed=False).add_to(m)
                 st_folium(m, height=500, use_container_width=True)
             else:
-                st.warning("Konum verisi bekleniyor...")
+                st.warning("Konum verisi yok.")
 
-        # --- SAĞ PANEL DÜZENİ ---
+        # 2. SAĞ TARAF (BİLGİ KARTI)
         with col_info:
             
-            # A) SON DURUM
-            status_color = "🟢" if shared_device.is_active else "🔴"
-            status_text = "Aktif" if shared_device.is_active else "Pasif"
+            # A) ADRES ÇÖZÜMLEME (DAHA GÜÇLÜ KOD)
+            st.markdown("### 📍 Konum Bilgisi")
             
-            st.markdown(f"### 📝 Son Durum : {status_color} {status_text}")
-            st.write("") 
+            address_display = "Adres bulunamadı."
+            gmaps_link = "#"
             
-            # B) ADRES BİLGİSİ
-            st.markdown("**📍 Güncel Adres**")
-            st.info(stats["address"])
-            st.write("") 
+            if telemetry:
+                lat = telemetry[0].latitude
+                lon = telemetry[0].longitude
+                gmaps_link = f"https://www.google.com/maps?q={lat},{lon}"
+                
+                # Önce veritabanına bak
+                if shared_device.address and len(shared_device.address) > 10:
+                    address_display = shared_device.address
+                else:
+                    # Yoksa Canlı Çevir
+                    try:
+                        # user_agent'ı değiştirdik ki engellenmeyelim
+                        geolocator = Nominatim(user_agent="solidtrack_v2_geo_finder")
+                        # timeout'u 10 saniye yaptık
+                        location = geolocator.reverse(f"{lat}, {lon}", language='tr', timeout=10)
+                        
+                        if location and location.address:
+                            address_display = location.address
+                        else:
+                            address_display = f"{lat:.5f}, {lon:.5f}"
+                    except Exception as e:
+                        # Hata olursa koordinat göster ama hatayı terminale bas
+                        print(f"Geocoding Hatası: {e}") 
+                        address_display = f"{lat:.5f}, {lon:.5f}"
+
+            # Adresi Mavi Kutu İçinde Göster
+            st.info(f"{address_display}")
             
-            # C) ÇALIŞMA BİLGİLERİ
-            st.markdown("### ⏱️ Son Çalışma Bilgileri")
-            
-            now = datetime.now()
-            end_time = now - timedelta(minutes=45) 
-            start_time = end_time - timedelta(hours=1, minutes=22)
-            
-            st.markdown(f"""
-            **Başlangıç:** {start_time.strftime('%d.%m.%Y - %H:%M')}  
-            **Bitiş:** {end_time.strftime('%d.%m.%Y - %H:%M')}  
-            **Süre:** 1 saat 22 dakika
-            """)
+            # Google Maps Linki
+            st.markdown(f"[🗺️ Google Haritalar'da Aç]({gmaps_link})")
             
             st.markdown("---")
             
-            # D) WHATSAPP BUTONU
-            current_url = f"http://localhost:8501/?token={token}"
-            whatsapp_url = f"https://wa.me/?text=Makineyi%20buradan%20izleyebilirsin:%20{current_url}"
-            
-            st.markdown(f"""
-                <a href="{whatsapp_url}" target="_blank" style="text-decoration: none;">
-                    <div style="
-                        background-color: #25D366; 
-                        color: white; 
-                        padding: 15px; 
-                        border-radius: 8px; 
-                        text-align: center; 
-                        font-weight: bold; 
-                        font-size: 18px;
-                        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-                        transition: transform 0.2s;">
-                        📲 WhatsApp ile Gönder
+            # B) SON SİNYAL
+            if telemetry:
+                ts_str = format_date_for_ui(telemetry[0].timestamp, "Europe/Istanbul", include_offset=True)
+                
+                st.markdown(f"""
+                <div style="background-color: #f1f3f4; padding: 15px; border-radius: 8px; border-left: 5px solid #225d97;">
+                    <div style="display: flex; align-items: center;">
+                        <div style="width: 12px; height: 12px; background-color: #28a745; border-radius: 50%; margin-right: 10px; box-shadow: 0 0 5px #28a745;"></div>
+                        <span style="font-size: 14px; font-weight: bold; color: #333;">Son Sinyal</span>
                     </div>
-                </a>
-            """, unsafe_allow_html=True)
+                    <div style="margin-top: 8px; font-size: 16px; font-weight: bold; color: #555; margin-left: 22px;">
+                        {ts_str}
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.warning("Sinyal yok.")
             
             st.markdown("---")
             st.caption("Powered by SolidTrack IoT")
         
         st.stop()
     else:
-        st.error("❌ Bu link geçersiz veya süresi dolmuş.")
+        st.error("❌ Bu link geçersiz.")
+
+        # 3 saniye bekle, URL'i temizle ve ana ekrana dön
+        import time
+        time.sleep(2)
+        st.query_params.clear() # URL'deki ?token=... kısmını siler
+        st.rerun() # Sayfayı yeniler
 
 # =========================================================
 # NORMAL UYGULAMA AKIŞI (LOGIN)
@@ -407,6 +431,7 @@ else:
         
         if user.role == "Admin":
             menu_options["👥 Müşteri Yönetimi"] = admin_users
+            menu_options["📂 Doküman Yönetimi"] = admin_documents
 
         # --- NORTH FALCON FİLTRESİ ---
         # Eğer SubUser ise ve kısıtlıysa, menüyü daralt
@@ -450,6 +475,13 @@ else:
              st.session_state["menu_selection"] = selected_menu
              st.rerun()
 
+        if "original_admin" in st.session_state and st.session_state["original_admin"]:
+            st.sidebar.warning("🕵️‍♂️ Şu an Gözcü Modundasınız")
+            if st.sidebar.button("🔙 Admin Hesabıma Dön", use_container_width=True):
+                st.session_state["user"] = st.session_state["original_admin"]
+                del st.session_state["original_admin"]
+                st.rerun()
+                
         st.markdown("---")
         if st.button("Çıkış Yap", use_container_width=True): 
             st.session_state.user = None
