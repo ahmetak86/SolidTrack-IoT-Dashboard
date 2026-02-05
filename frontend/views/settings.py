@@ -98,34 +98,74 @@ def load_view(user):
     with tab1:
         st.subheader("1. Firma Bilgileri & İletişim")
         
+        # Salt okunur uyarısı (SubUser ise)
+        is_read_only = (user.role == "SubUser")
+        if is_read_only:
+            st.info("🔒 Alt kullanıcı olduğunuz için firma bilgilerini değiştiremezsiniz.")
+
         with st.form("settings_form_company"):
-            settings_company = {}
-            r1_c1, r1_c2 = st.columns(2)
-            settings_company['company_name'] = r1_c1.text_input("Firma Ünvanı", value=user.company_name)
-            settings_company['full_name'] = r1_c2.text_input("Yetkili Ad Soyad", value=user.full_name)
+            c1, c2 = st.columns(2)
             
-            r2_c1, r2_c2 = st.columns(2)
-            settings_company['tax_office'] = r2_c1.text_input("Vergi Dairesi", value=user.tax_office)
-            settings_company['tax_number'] = r2_c2.text_input("Vergi Numarası", value=user.tax_number)
-            
-            settings_company['company_address'] = st.text_area("Fatura Adresi", value=user.company_address)
-            
-            st.markdown("---")
-            r3_c1, r3_c2 = st.columns(2)
-            settings_company['email'] = r3_c1.text_input("E-Posta", value=user.email)
-            settings_company['phone'] = r3_c2.text_input("Telefon", value=user.phone)
+            # --- SOL KOLON ---
+            with c1:
+                # Firma Adı
+                val_comp = user.company_name if user.company_name else ""
+                new_comp = st.text_input("Firma Ünvanı", value=val_comp, disabled=is_read_only)
+                
+                # Yetkili Ad Soyad (Ad + Soyad birleştirip gösteriyoruz veya ayrıştırabiliriz)
+                # Basitlik için full_name kullanıyoruz, backend bunu ayrıştırabilir veya tek tutabilir
+                val_full = user.full_name if user.full_name else ""
+                new_full = st.text_input("Yetkili Ad Soyad", value=val_full, disabled=is_read_only)
+                
+                # E-Posta (Değiştirilemez)
+                st.text_input("E-Posta", value=user.email, disabled=True, help="E-posta adresi değiştirilemez.")
+
+            # --- SAĞ KOLON ---
+            with c2:
+                # Vergi Dairesi
+                val_tax_off = user.tax_office if user.tax_office else ""
+                new_tax_off = st.text_input("Vergi Dairesi", value=val_tax_off, disabled=is_read_only)
+                
+                # Vergi Numarası (user.tax_no kullanılıyor)
+                val_tax_no = user.tax_no if user.tax_no else ""
+                new_tax_no = st.text_input("Vergi Numarası", value=val_tax_no, disabled=is_read_only)
+                
+                # Telefon
+                val_phone = user.phone if user.phone else ""
+                new_phone = st.text_input("Telefon", value=val_phone, disabled=is_read_only)
+
+            # Adres (Tam Genişlik)
+            val_addr = user.company_address if user.company_address else ""
+            new_addr = st.text_area("Fatura Adresi", value=val_addr, disabled=is_read_only)
             
             st.write("")
-            if st.form_submit_button("💾 Bilgileri Güncelle"):
-                updated_user = update_user_settings(user.id, settings_company)
-                if updated_user:
-                    st.session_state.user = updated_user
-                    st.success("Bilgiler başarıyla güncellendi!")
-                    st.rerun()
+            
+            # KAYDET BUTONU
+            if not is_read_only:
+                if st.form_submit_button("💾 Bilgileri Güncelle", type="primary"):
+                    # Paketi hazırla
+                    settings_company = {
+                        'company_name': new_comp,
+                        'full_name': new_full,
+                        'tax_office': new_tax_off,
+                        'tax_no': new_tax_no, 
+                        'phone': new_phone,
+                        'company_address': new_addr
+                    }
+                    
+                    # Güncelleme Fonksiyonunu Çağır
+                    success, msg = update_user_settings(user.id, settings_company)
+                    
+                    if success:
+                        st.success("Firma bilgileri güncellendi!")
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.error(f"Hata: {msg}")
 
+        # --- ŞİFRE DEĞİŞTİRME BÖLÜMÜ (AYNEN KORUNDU) ---
         st.markdown("---")
-        st.markdown("---")
-        st.subheader("🔐 Şifre Değiştir")
+        st.subheader("2. Şifre Değiştir")
         
         with st.form("change_pass_form"):
             cp_1, cp_2, cp_3 = st.columns(3)
@@ -145,7 +185,8 @@ def load_view(user):
                     else:
                         st.error(msg)
 
-        # --- LOGO ALANI ---
+        # --- LOGO ALANI (AYNEN KORUNDU) ---
+        st.markdown("---")
         st.subheader("3. Firma Logosu")
         st.caption("Firma logonuzu yükleyerek raporlarda ve menüde görünmesini sağlayabilirsiniz.")
 
@@ -177,20 +218,80 @@ def load_view(user):
                     st.error("❌ Dosya boyutu 5MB'dan büyük olamaz!")
                 else:
                     if st.button("Logoyu Sisteme Yükle", type="primary", use_container_width=True):
-                        saved_path = save_uploaded_file(uploaded_logo, user.id)
-                        updated_user = update_user_settings(user.id, {'logo_url': saved_path})
-                        if updated_user: st.session_state.user = updated_user
-                        st.session_state.edit_logo_mode = False
-                        st.success("✅ Logo yüklendi!")
-                        st.rerun()
+                        # save_uploaded_file fonksiyonunun settings.py içinde tanımlı olduğundan emin ol
+                        # Değilse bu fonksiyonu da eklememiz gerekir.
+                        try:
+                            saved_path = save_uploaded_file(uploaded_logo, user.id)
+                            updated_user = update_user_settings(user.id, {'logo_url': saved_path})
+                            if updated_user: 
+                                st.success("✅ Logo yüklendi!")
+                                time.sleep(1)
+                                st.session_state.edit_logo_mode = False
+                                st.rerun()
+                        except NameError:
+                            st.error("Logo kaydetme fonksiyonu bulunamadı.")
 
     # -------------------------------------------------------
-    # TAB 2: SİSTEM & GÖRÜNÜM
+    # TAB 2: SİSTEM & GÖRÜNÜM (OTO ALGILAMA EN ÜSTTE)
     # -------------------------------------------------------
     with tab2:
         st.subheader("🌍 Bölgesel Ayarlar")
         
+        # --- 1. OTO TESPİT (EN ÜSTE TAŞINDI) ---
+        # Kullanıcıya bilgi vererek butonu sunuyoruz
+        st.markdown("##### 📍 Hızlı Kurulum")
+        st.caption("Sistem ayarlarını (Saat dilimi vb.) sahadaki aktif cihazınızın konumuna göre otomatik ayarlayabilirsiniz.")
+        
+        c_detect, c_space = st.columns([1, 2])
+        with c_detect:
+            if st.button("✨ Cihaz Konumuna Göre Ayarla", type="primary", use_container_width=True):
+                with st.spinner("Tüm filo taranıyor ve analiz ediliyor..."):
+                    # Veritabanından cihazları ve son konumlarını çek
+                    user_devices = get_user_devices(user.id)
+                    
+                    if not user_devices:
+                        st.error("Hiç cihazınız yok.")
+                    else:
+                        from backend.database import get_device_telemetry
+                        from collections import Counter
+                        
+                        # Tüm cihazların saat dilimlerini topla
+                        found_timezones = []
+                        
+                        for d in user_devices:
+                            logs = get_device_telemetry(d.device_id, limit=1)
+                            if logs and logs[0].latitude and logs[0].longitude:
+                                tz = get_timezone_from_coords(logs[0].latitude, logs[0].longitude)
+                                if tz:
+                                    found_timezones.append(tz)
+                        
+                        if found_timezones:
+                            # En çok tekrar eden saat dilimini bul (Majority Voting)
+                            most_common_tz, count = Counter(found_timezones).most_common(1)[0]
+                            total_found = len(found_timezones)
+                            
+                            # Ayarı kaydet
+                            update_user_settings(user.id, {'timezone': most_common_tz})
+                            
+                            # Kullanıcıya detaylı bilgi ver
+                            formatted_tz = format_timezone_label(most_common_tz)
+                            
+                            if count == total_found:
+                                # Tüm cihazlar aynı yerde
+                                st.success(f"✅ Başarılı! Tüm filonuz ({count} cihaz) **{formatted_tz}** bölgesinde.")
+                            else:
+                                # Farklı bölgeler var
+                                st.success(f"✅ Ayarlandı: **{formatted_tz}**")
+                                st.info(f"ℹ️ Not: Cihazlarınızın {count}/{total_found} tanesi bu bölgede. Diğerleri farklı saat dilimlerinde olsa da, paneliniz çoğunluğa göre ayarlandı.")
+                            
+                            time.sleep(3)
+                            st.rerun()
+                        else:
+                            st.warning("⚠️ Cihazlarınızın hiçbirinde geçerli GPS verisi bulunamadı. Lütfen manuel seçim yapın")
+
+        # --- 2. MANUEL FORM (ALTTA KALDI) ---
         with st.form("settings_form_system"):
+            st.write("**Manuel Ayarlar**")
             settings_sys = {}
             sys_c1, sys_c2 = st.columns([1, 2])
             
@@ -244,58 +345,71 @@ def load_view(user):
                     time.sleep(1)
                     st.rerun()
 
-        # --- OTO TESPİT (FORM DIŞI) ---
-        st.markdown("##### 📍 Otomatik Algılama")
-        c_detect, c_info = st.columns([1, 3])
-        with c_detect:
-            if st.button("Cihaz Konumuna Göre Ayarla"):
-                with st.spinner("Cihazlar taranıyor..."):
-                    user_devices = get_user_devices(user.id)
-                    found_tz = None
-                    for d in user_devices:
-                        from backend.database import get_device_telemetry
-                        logs = get_device_telemetry(d.device_id, limit=1)
-                        if logs and logs[0].latitude and logs[0].longitude:
-                            found_tz = get_timezone_from_coords(logs[0].latitude, logs[0].longitude)
-                            if found_tz: break
-                
-                if found_tz:
-                    update_user_settings(user.id, {'timezone': found_tz})
-                    st.success(f"Saat dilimi cihaz konumuna göre ayarlandı: **{format_timezone_label(found_tz)}**")
-                    time.sleep(2)
-                    st.rerun()
-                else:
-                    st.error("Konum verisi olan aktif bir cihaz bulunamadı.")
-
-    # -------------------------------------------------------
-    # TAB 3: BİLDİRİMLER
+   # -------------------------------------------------------
+    # TAB 3: BİLDİRİMLER (GÜNCELLENMİŞ & KORUMALI)
     # -------------------------------------------------------
     with tab3:
         st.subheader("Bildirim Tercihleri")
+        
+        # Kısıtlama Kontrolü: SubUser ise değiştiremesin
+        is_read_only = (user.role == "SubUser")
+        
+        if is_read_only:
+            st.warning("🔒 Alt kullanıcı yetkisiyle görüntülüyorsunuz. Değişiklik yapamazsınız.")
+
         with st.form("settings_form_notify"):
-            settings_notif = {}
-            settings_notif['notification_email_enabled'] = st.toggle("📧 E-Posta Bildirimleri (Genel)", value=user.notification_email_enabled)
+            # Genel Anahtar
+            n_email = st.toggle("📧 E-Posta Bildirimleri (Genel)", value=user.notification_email_enabled, disabled=is_read_only)
             
             st.markdown("---")
             st.write("**Hangi durumlarda bildirim almak istersiniz?**")
             
             b_c1, b_c2 = st.columns(2)
             with b_c1:
-                settings_notif['notify_low_battery'] = st.checkbox("Düşük Pil Uyarısı", value=user.notify_low_battery)
-                settings_notif['notify_shock'] = st.checkbox("Kritik Darbe / Şok", value=user.notify_shock)
-                settings_notif['notify_geofence'] = st.checkbox("Bölge İhlali", value=user.notify_geofence)
+                st.caption("🚨 Anlık Uyarılar")
+                n_batt = st.checkbox("Düşük Pil Uyarısı", value=user.notify_low_battery, disabled=is_read_only)
+                n_shock = st.checkbox("Kritik Darbe / Şok", value=user.notify_shock, disabled=is_read_only)
+                n_geo = st.checkbox("Bölge İhlali", value=user.notify_geofence, disabled=is_read_only)
+            
             with b_c2:
-                settings_notif['notify_maintenance'] = st.checkbox("Bakım Zamanı", value=user.notify_maintenance)
-                settings_notif['notify_daily_report'] = st.checkbox("Günlük Rapor", value=user.notify_daily_report)
+                st.caption("📊 Raporlar & Bakım")
+                n_maint = st.checkbox("Bakım Zamanı", value=user.notify_maintenance, disabled=is_read_only)
+                n_daily = st.checkbox("Günlük Rapor", value=user.notify_daily_report, disabled=is_read_only)
+                # [YENİ EKLENENLER]
+                n_weekly = st.checkbox("Haftalık Rapor", value=user.notify_weekly_report, disabled=is_read_only)
+                n_monthly = st.checkbox("Aylık Rapor", value=user.notify_monthly_report, disabled=is_read_only)
                 
             st.write("")
-            if st.form_submit_button("💾 Bildirim Ayarlarını Kaydet"):
-                updated_user = update_user_settings(user.id, settings_notif)
-                if updated_user:
-                    st.session_state.user = updated_user
-                    st.success("Bildirim tercihleri kaydedildi!")
-                    time.sleep(1)
-                    st.rerun()
+            
+            # Eğer salt okunur değilse Kaydet butonunu göster
+            if not is_read_only:
+                if st.form_submit_button("💾 Bildirim Ayarlarını Kaydet", type="primary"):
+                    # Backend'e gidecek paket
+                    settings_notif = {
+                        'notification_email_enabled': n_email,
+                        'notify_low_battery': n_batt,
+                        'notify_shock': n_shock,
+                        'notify_geofence': n_geo,
+                        'notify_maintenance': n_maint,
+                        'notify_daily_report': n_daily,
+                        'notify_weekly_report': n_weekly, # Yeni
+                        'notify_monthly_report': n_monthly # Yeni
+                    }
+                    
+                    # update_user_settings fonksiyonunu backend/database.py'den çağırmalıyız
+                    # Eğer import edilmediyse en tepeye: from backend.database import update_user_settings
+                    try:
+                        success, msg = update_user_settings(user.id, settings_notif)
+                        if success:
+                            st.success("Bildirim tercihleri kaydedildi!")
+                            time.sleep(1)
+                            st.rerun()
+                        else:
+                            st.error(f"Hata: {msg}")
+                    except NameError:
+                        # Eğer update_user_settings yerine update_user_preferences kullanıyorsan:
+                        # (Kodlarında iki isim de geçiyordu, hangisi aktifse onu kullan)
+                        st.error("Fonksiyon hatası: update_user_settings import edilmemiş olabilir.")
 
     # -------------------------------------------------------
     # TAB 4: EKİP YÖNETİMİ (NORTH FALCON + ESKİ WHATSAPP SİSTEMİ) 🦅

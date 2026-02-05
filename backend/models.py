@@ -1,6 +1,6 @@
 # backend/models.py (V5 - FINAL + YENİ ÖZELLİKLER)
 from sqlalchemy import Column, String, Integer, Float, Boolean, DateTime, ForeignKey, Text, Table
-from sqlalchemy.orm import declarative_base, relationship
+from sqlalchemy.orm import declarative_base, relationship, backref
 from datetime import datetime
 
 Base = declarative_base()
@@ -39,28 +39,43 @@ class UtilizationProfile(Base):
 # ---------------------------------------------------------
 class User(Base):
     __tablename__ = 'users'
+    
     id = Column(String, primary_key=True)
     username = Column(String, unique=True, nullable=False)
     email = Column(String, unique=True, nullable=False)
     password_hash = Column(String, nullable=False)
     role = Column(String, default='Client')
-    trusted_group_id = Column(Integer, nullable=True) # Örn: 9840 veya 7153
-    is_active = Column(Boolean, default=True)  # Kullanıcıyı silmeden pasife almak için
-    allowed_pages = Column(String, nullable=True)      # Alt kullanıcı yetkileri
-    allowed_device_ids = Column(String, nullable=True) # Alt kullanıcı cihazları
-    admin_note = Column(String, nullable=True)        # Senin özel notun
-    subscription_end_date = Column(DateTime, nullable=True) # Lisans bitiş tarihi
-    device_limit = Column(Integer, default=100)       # Cihaz ekleme kotası
-    last_login_at = Column(DateTime, nullable=True)   # Son görülme
+    trusted_group_id = Column(String, nullable=True) 
+    is_active = Column(Boolean, default=True) 
+    allowed_pages = Column(String, nullable=True)      
+    allowed_device_ids = Column(String, nullable=True) 
+    admin_note = Column(String, nullable=True)        
+    subscription_end_date = Column(DateTime, nullable=True) 
+    device_limit = Column(Integer, default=100)       
+    last_login_at = Column(DateTime, nullable=True)   
     
     # Profil Bilgileri
     company_name = Column(String)
     full_name = Column(String)
+    first_name = Column(String, nullable=True)  # Ad
+    last_name = Column(String, nullable=True)   # Soyad
+    country = Column(String, default="Türkiye") # Ülke
     phone = Column(String)
     logo_url = Column(String)
     company_address = Column(String) 
-    tax_office = Column(String)
-    tax_number = Column(String)
+    # BURADAKİ ESKİ 'tax_office' ve 'tax_number' SİLİNDİ (Çünkü aşağıda var)
+
+    # --- [YENİ] Hiyerarşi ve Kurumsal Detaylar ---
+    parent_id = Column(String, ForeignKey('users.id'), nullable=True) # Üst Kullanıcı ID'si
+    
+    # Fatura Detayları
+    tax_no = Column(String, nullable=True)      # Vergi Numarası
+    tax_office = Column(String, nullable=True)  # Vergi Dairesi
+    billing_address = Column(String, nullable=True) # Fatura Adresi
+    
+    # Hiyerarşik İlişki (Self-Referential)
+    children = relationship("User", backref=backref('parent', remote_side=[id]))
+    # ---------------------------------------------
     
     # Ayarlar
     language = Column(String, default='Turkish')
@@ -80,6 +95,8 @@ class User(Base):
     notify_geofence = Column(Boolean, default=True)
     notify_maintenance = Column(Boolean, default=True)
     notify_daily_report = Column(Boolean, default=True)
+    notify_weekly_report = Column(Boolean, default=False) # Haftalık Rapor
+    notify_monthly_report = Column(Boolean, default=False) # Aylık Rapor
     
     # İlişkiler
     devices = relationship("Device", back_populates="owner")

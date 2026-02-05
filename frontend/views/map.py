@@ -215,13 +215,18 @@ def load_view(user):
 
     # Zoom Önceliği
     if is_single_device and history_logs:
-         start_coords = [history_logs[0].latitude, history_logs[0].longitude]
-         default_zoom = 12
+         # SİGORTA 1: Geçmiş verinin koordinatı var mı?
+         if history_logs[0].latitude is not None and history_logs[0].longitude is not None:
+             start_coords = [history_logs[0].latitude, history_logs[0].longitude]
+             default_zoom = 12
+             
     elif is_single_device and final_devices:
          l = get_device_telemetry(final_devices[0].device_id, limit=1)
-         if l:
+         # SİGORTA 2: Son gelen verinin koordinatı var mı?
+         if l and l[0].latitude is not None and l[0].longitude is not None:
              start_coords = [l[0].latitude, l[0].longitude]
              default_zoom = 12
+         # Eğer veri var ama koordinat yoksa (None ise), varsayılan [39.0, 35.0] kalır.
 
     # --- GOOGLE MAPS ENTEGRASYONU BURADA BAŞLIYOR ---
     # tiles=None ile boş başlatıyoruz
@@ -247,9 +252,11 @@ def load_view(user):
 
     Fullscreen().add_to(m)
 
-    # --- ROTA ÇİZİMİ (ANTPATH - AYNEN KORUNDU) ---
+    # --- ROTA ÇİZİMİ (ANTPATH - DÜZELTİLMİŞ) ---
     if is_single_device and history_logs:
-        pts = [[l.latitude, l.longitude] for l in history_logs]
+        # DÜZELTME: Listeyi oluştururken "None" olanları filtrele
+        pts = [[l.latitude, l.longitude] for l in history_logs if l.latitude is not None and l.longitude is not None]
+        
         if len(pts) > 1:
             AntPath(
                 locations=pts, 
@@ -261,10 +268,29 @@ def load_view(user):
                 pulse_color="#f1c232"  # Solidus Sarısı
             ).add_to(m)
             
-            start_t = history_logs[0].timestamp.strftime('%d.%m %H:%M')
-            end_t = history_logs[-1].timestamp.strftime('%d.%m %H:%M')
-            folium.Marker(pts[0], popup=f"🏁 Başlangıç: {start_t}", icon=folium.Icon(color="green", icon="play", prefix="fa")).add_to(m)
-            folium.Marker(pts[-1], popup=f"🛑 Bitiş: {end_t}", icon=folium.Icon(color="red", icon="flag", prefix="fa")).add_to(m)
+            # Başlangıç ve Bitiş ikonlarını da filtrelenmiş listeden (pts) alıyoruz
+            # Böylece None hatası alma ihtimali kalmıyor.
+            
+            # Zaman damgalarını bulmak için orijinal listeden eşleştirme yapmak yerine
+            # Basitçe ilk ve son geçerli noktanın zamanını history_logs'dan bulabiliriz 
+            # veya görselde sadece ikon kalsa da olur.
+            
+            # En temiz yöntem: pts listesi koordinatları tutuyor. 
+            # İlk ve son noktanın koordinatına marker koyalım.
+            
+            # Başlangıç Noktası (İlk geçerli veri)
+            folium.Marker(
+                pts[0], 
+                popup="🏁 Başlangıç Rota", 
+                icon=folium.Icon(color="green", icon="play", prefix="fa")
+            ).add_to(m)
+            
+            # Bitiş Noktası (Son geçerli veri)
+            folium.Marker(
+                pts[-1], 
+                popup="🛑 Bitiş Rota", 
+                icon=folium.Icon(color="red", icon="flag", prefix="fa")
+            ).add_to(m)
 
     # --- KÜMELEME ---
     cluster = MarkerCluster(name="Küme", icon_create_function="""
@@ -276,64 +302,98 @@ def load_view(user):
     map_layer = cluster if enable_cluster else m
     if enable_cluster: cluster.add_to(m)
 
-    # --- PİNLER (MARKERS) ---
+    # --- PİNLER (MARKERS) - (FULL VERSİYON: KONUM + ZAMAN + PİL FIX) ---
     for d in final_devices:
-        logs = get_device_telemetry(d.device_id, limit=1)
-        if logs:
-            l = logs[0]
+        # Son 50 kaydı çekiyoruz
+        recent_logs = get_device_telemetry(d.device_id, limit=50)
+        
+        if recent_logs:
+            # 1. EN GÜNCEL VERİ (Zaman referansı)
+            latest_log = recent_logs[0]
             
-            # 1. ÖNCE ZAMANI HESAPLA (Bu satır eksik veya aşağıda kalmış olabilir)
-            signal_time_str = format_date_for_ui(l.timestamp, user.timezone, include_offset=True)
+            # 2. GEÇERLİ KONUM ARA (Geriye doğru)
+            valid_gps_log = None
+            for log in recent_logs:
+                if log.latitude is not None and log.longitude is not None:
+                    valid_gps_log = log
+                    break 
             
-            # 2. DİĞER İSTATİSTİKLERİ ÇEK
-            total_h = get_device_total_hours(d.device_id)
-            stats = get_last_operation_stats(d.device_id)
-            last_dur_str = stats["duration"]
+            # 3. GEÇERLİ PİL DEĞERİ ARA (Geriye doğru - YENİ EKLENDİ)
+            # Canlı veride pil 0 gelebileceği için, 0 olmayan son değeri buluyoruz.
+            safe_bat = '--'
+            for log in recent_logs:
+                if log.battery_pct is not None and log.battery_pct > 0:
+                    safe_bat = int(log.battery_pct)
+                    break
             
-            # 3. İKON VE PİL
-            c_icon = get_icon_path(d.icon_type)
-            icon_obj = folium.CustomIcon(icon_image=c_icon, icon_size=(64, 86), icon_anchor=(32, 86), popup_anchor=(0, -80)) if c_icon else folium.Icon(color="blue", icon="wrench", prefix="fa")
-            safe_bat = int(l.battery_pct) if l.battery_pct is not None else '--'
+            # Eğer geçerli bir konum bulduysak pini bas
+            if valid_gps_log:
+                # Konum -> Geçmişten (valid_gps_log)
+                pin_lat = valid_gps_log.latitude
+                pin_lon = valid_gps_log.longitude
+                
+                # Zaman -> Bugünden (latest_log)
+                signal_time_str = format_date_for_ui(latest_log.timestamp, user.timezone, include_offset=True)
+                
+                # Diğer İstatistikler
+                total_h = get_device_total_hours(d.device_id)
+                stats = get_last_operation_stats(d.device_id)
+                last_dur_str = stats["duration"]
+                
+                # İkon
+                c_icon = get_icon_path(d.icon_type)
+                icon_obj = folium.CustomIcon(icon_image=c_icon, icon_size=(64, 86), icon_anchor=(32, 86), popup_anchor=(0, -80)) if c_icon else folium.Icon(color="blue", icon="wrench", prefix="fa")
 
-            # 4. POPUP HTML (Artık signal_time_str tanımlı olduğu için hata vermez)
-            popup_html = f"""
-            <div style="font-family: sans-serif; width: 240px; color:#333;">
-                <b style="font-size:14px">{d.unit_name}</b><br>
-                <span style="color:gray; font-size:11px">{d.asset_model} ({get_display_name(d.icon_type)})</span>
-                <hr style="margin:5px 0; border-top: 1px solid #ddd;">
-                <div style="font-size:12px; line-height:1.6;">
-                    📡 <b>Son Sinyal:</b> {signal_time_str}<br>
-                    ⏱️ <b>Son Çalışma:</b> {last_dur_str}<br>
-                    ∑ <b>Top. Çalışma:</b> {total_h} Saat<br>
-                    📍 <b>Konum:</b> {l.latitude:.5f}, {l.longitude:.5f}<br>
-                    🔋 <b>Pil:</b> %{safe_bat}
+                # Popup HTML
+                popup_html = f"""
+                <div style="font-family: sans-serif; width: 240px; color:#333;">
+                    <b style="font-size:14px">{d.unit_name}</b><br>
+                    <span style="color:gray; font-size:11px">{d.asset_model} ({get_display_name(d.icon_type)})</span>
+                    <hr style="margin:5px 0; border-top: 1px solid #ddd;">
+                    <div style="font-size:12px; line-height:1.6;">
+                        📡 <b>Son Sinyal:</b> {signal_time_str}<br>
+                        ⏱️ <b>Son Çalışma:</b> {last_dur_str}<br>
+                        ∑ <b>Top. Çalışma:</b> {total_h} Saat<br>
+                        📍 <b>Konum:</b> {pin_lat:.5f}, {pin_lon:.5f}<br>
+                        🔋 <b>Pil:</b> %{safe_bat}
+                    </div>
+                    <div style="text-align: center; margin-top: 10px;">
+                        <a href="/?target_device={d.device_id}" target="_self" 
+                           style="background-color: #225d97; color: white; text-decoration: none; padding: 8px 15px; border-radius: 4px; font-size: 13px; font-weight: bold; display: inline-block;">
+                            🔍 Detay Görmek için Tıklayın
+                        </a>
+                    </div>
                 </div>
-                <div style="text-align: center; margin-top: 10px;">
-                    <a href="/?target_device={d.device_id}" target="_self" 
-                       style="background-color: #225d97; color: white; text-decoration: none; padding: 8px 15px; border-radius: 4px; font-size: 13px; font-weight: bold; display: inline-block;">
-                        🔍 Detay Görmek için Tıklayın
-                    </a>
-                </div>
-            </div>
-            """
-            folium.Marker([l.latitude, l.longitude], popup=folium.Popup(popup_html, max_width=260), tooltip=d.unit_name, icon=icon_obj).add_to(map_layer)
+                """
+                folium.Marker([pin_lat, pin_lon], popup=folium.Popup(popup_html, max_width=260), tooltip=d.unit_name, icon=icon_obj).add_to(map_layer)
 
-    # Otomatik Bounds
+    # Otomatik Bounds (DÜZELTİLMİŞ)
     if is_single_device and history_logs:
-         lats_h = [l.latitude for l in history_logs]
-         lons_h = [l.longitude for l in history_logs]
-         m.fit_bounds([[min(lats_h), min(lons_h)], [max(lats_h), max(lons_h)]], padding=(50, 50))
+         # 1. Sadece KONUMU OLAN verileri listeye al (None olanları at)
+         lats_h = [l.latitude for l in history_logs if l.latitude is not None]
+         lons_h = [l.longitude for l in history_logs if l.longitude is not None]
+         
+         # 2. Eğer liste doluysa odakla (Boşsa hata vermez)
+         if lats_h and lons_h:
+             m.fit_bounds([[min(lats_h), min(lons_h)], [max(lats_h), max(lons_h)]], padding=(50, 50))
+             
     elif is_single_device and final_devices:
          l = get_device_telemetry(final_devices[0].device_id, limit=1)
-         if l: m.fit_bounds([[l[0].latitude, l[0].longitude], [l[0].latitude, l[0].longitude]], max_zoom=15)
+         # Sadece geçerli koordinat varsa odakla
+         if l and l[0].latitude is not None and l[0].longitude is not None:
+             m.fit_bounds([[l[0].latitude, l[0].longitude], [l[0].latitude, l[0].longitude]], max_zoom=15)
+             
     elif not is_single_device and final_devices:
          all_lats = []
          all_lons = []
          for dev in final_devices:
              last_log = get_device_telemetry(dev.device_id, limit=1)
-             if last_log:
+             # Sadece KONUMU OLAN verileri listeye ekle
+             if last_log and last_log[0].latitude is not None:
                  all_lats.append(last_log[0].latitude)
                  all_lons.append(last_log[0].longitude)
+         
+         # Liste doluysa odakla
          if all_lats:
              m.fit_bounds([[min(all_lats), min(all_lons)], [max(all_lats), max(all_lons)]], padding=(50, 50))
 

@@ -5,6 +5,10 @@ import os
 from geopy.distance import geodesic
 from timezonefinder import TimezoneFinder
 import pytz
+import json
+
+# SQLAlchemy optimizasyonu için
+from sqlalchemy.orm import joinedload
 
 tf = TimezoneFinder()
 
@@ -16,17 +20,17 @@ sys.path.append(parent_dir)
 try:
     # 1. Yöntem: Backend modülü olarak çağırma
     from backend.database import SessionLocal
-    from backend.models import AlarmEvent, Device, TelemetryLog, GeoSite
+    from backend.models import AlarmEvent, Device, TelemetryLog, GeoSite, Setting
 except ImportError:
     try:
         # 2. Yöntem: Aynı klasörden direkt çağırma
         from database import SessionLocal
-        from models import AlarmEvent, Device, TelemetryLog, GeoSite
+        from models import AlarmEvent, Device, TelemetryLog, GeoSite, Setting
     except ImportError:
         # 3. Yöntem: Manuel yol ekleme
         sys.path.append(current_dir)
         from database import SessionLocal
-        from models import AlarmEvent, Device, TelemetryLog, GeoSite
+        from models import AlarmEvent, Device, TelemetryLog, GeoSite, Setting
 # --------------------------------------------------
 
 # Loglama ayarları
@@ -63,6 +67,7 @@ def get_device_local_time(db, device_id, utc_time):
 def check_geofence_violations():
     """
     Geofence İhlalleri (Global - Dinamik Saat Gösterimli)
+    [GÜNCELLENDİ]: Kullanıcı 'notify_geofence' kapattıysa alarm üretilmez.
     """
     db = SessionLocal()
     new_alarms_count = 0
@@ -83,6 +88,12 @@ def check_geofence_violations():
             if not site.devices: continue
                 
             for device in site.devices:
+                # --- [BEKÇİ] Kullanıcı İzni Kontrolü ---
+                # Cihaz sahibine bak, eğer 'Bölge İhlali' bildirimini kapattıysa geç.
+                if not device.owner or not device.owner.notify_geofence:
+                    continue
+                # ---------------------------------------
+
                 last_log = db.query(TelemetryLog).filter(
                     TelemetryLog.device_id == device.device_id
                 ).order_by(TelemetryLog.timestamp.desc()).first()
@@ -93,10 +104,9 @@ def check_geofence_violations():
                     distance_m = geodesic(site_center, (last_log.latitude, last_log.longitude)).meters
                 except: continue 
                 
-                # --- YENİ: Cihazın Yerel Saatini Bul (Sırf ekrana doğru yazmak için) ---
+                # Cihazın Yerel Saatini Bul
                 local_time, tz_name = get_device_local_time(db, device.device_id, now_utc)
                 local_time_str = local_time.strftime("%H:%M")
-                # --------------------------------------------------------------------
 
                 if distance_m > radius_m:
                     existing_alarm = db.query(AlarmEvent).filter(
@@ -112,15 +122,15 @@ def check_geofence_violations():
                             alarm_type='Geofence_Exit',
                             severity='Critical',
                             is_active=True,
-                            # Açıklamaya yerel saati ekliyoruz
                             description=f"Sınır İhlali! Mesafe: {int(distance_m)}m (Yerel Saat: {local_time_str})",
-                            timestamp=now_utc # DB'ye UTC yazmaya devam (Doğrusu bu)
+                            timestamp=now_utc 
                         )
                         db.add(alarm)
                         new_alarms_count += 1
                         print(f"   🚨 ALARM: {device.unit_name} @ {site.name} (Saat: {local_time_str} {tz_name})")
                 
                 else:
+                    # Bölgeye geri döndü
                     existing_alarm = db.query(AlarmEvent).filter(
                         AlarmEvent.device_id == device.device_id,
                         AlarmEvent.geosite_id == site.site_id,
@@ -145,17 +155,19 @@ def check_geofence_violations():
 
 def check_utilization_alarm(device_id, duration_seconds, timestamp):
     """
-    [YENİ] Kullanım (Utilization) sürelerini kontrol eder ve Excel kurallarına göre alarm üretir.
-    Çağrıldığı yer: sync_utilization_smart.py
+    [YENİ] Kullanım (Utilization) sürelerini kontrol eder.
     """
     db = SessionLocal()
     try:
-        # --- [EKLE] Yerel Saat Hesapla ---
-        # timestamp parametresini kullanıyoruz
+        # --- [BEKÇİ] İzin Kontrolü ---
+        # Bu alarm türü için özel bir kutucuk yapmadık ama genelde 'Kritik Darbe/Şok'
+        # veya genel sistem uyarısı sayılabilir. Şimdilik açık bırakıyoruz.
+        # İstersen buraya 'notify_shock' bağlayabiliriz.
+        # -----------------------------
+
         if not timestamp: timestamp = datetime.utcnow()
         local_time, tz_str = get_device_local_time(db, device_id, timestamp)
         local_time_str = local_time.strftime("%H:%M")
-        # ---------------------------------
 
         alarm_data = None
         
@@ -164,7 +176,7 @@ def check_utilization_alarm(device_id, duration_seconds, timestamp):
             alarm_data = {
                 "type": "Hatalı Kullanım",
                 "severity": "Warning",
-                "desc": f"Operatör makineyi verimsiz kullanıyor ({local_time_str}).", # <-- DEĞİŞTİ
+                "desc": f"Operatör makineyi verimsiz kullanıyor ({local_time_str}).", 
                 "rule": "source_18"
             }
 
@@ -173,13 +185,11 @@ def check_utilization_alarm(device_id, duration_seconds, timestamp):
             alarm_data = {
                 "type": "Hatalı Kullanım",
                 "severity": "Critical",
-                "desc": f"Operatör makineyi hatalı kullanıyor ({local_time_str}).", # <-- DEĞİŞTİ
+                "desc": f"Operatör makineyi hatalı kullanıyor ({local_time_str}).", 
                 "rule": "source_19"
             }
         
-        # Eğer bir kural ihlali varsa kaydet
         if alarm_data:
-            # Spam Kontrolü: Son 1 dakika içinde aynı alarm var mı?
             last_alarm = db.query(AlarmEvent).filter(
                 AlarmEvent.device_id == device_id,
                 AlarmEvent.alarm_type == alarm_data["type"],
@@ -187,7 +197,7 @@ def check_utilization_alarm(device_id, duration_seconds, timestamp):
             ).order_by(AlarmEvent.timestamp.desc()).first()
 
             if last_alarm and (timestamp - last_alarm.timestamp).total_seconds() < 60:
-                return # Çok sık alarm üretme
+                return 
 
             new_alarm = AlarmEvent(
                 device_id=device_id,
@@ -212,25 +222,31 @@ def check_utilization_alarm(device_id, duration_seconds, timestamp):
 def check_maintenance_alarms(device_id, current_hours):
     """
     [YENİ] Makine saati üzerinden bakım zamanı kontrolü yapar.
-    Çağrıldığı yer: Telemetry veya Utilization verisi çekildiğinde.
+    [GÜNCELLENDİ]: Kullanıcı 'notify_maintenance' kapattıysa alarm üretilmez.
     """
     db = SessionLocal()
     now_utc = datetime.utcnow()
 
-    # --- [EKLE] Yerel Tarih Hesapla ---
+    # Cihazı ve Sahibini Çek (joinedload ile hızlandırılmış)
+    device = db.query(Device).options(joinedload(Device.owner)).filter(Device.device_id == device_id).first()
+    if not device: 
+        db.close()
+        return
+
+    # --- [BEKÇİ] İzin Kontrolü ---
+    if not device.owner or not device.owner.notify_maintenance:
+        db.close()
+        return # Bakım bildirimi kapalı, çık.
+    # -----------------------------
+
     local_time, _ = get_device_local_time(db, device_id, now_utc)
     local_date_str = local_time.strftime("%d.%m.%Y")
-    # ----------------------------------
 
     try:
-        device = db.query(Device).filter(Device.device_id == device_id).first()
-        if not device: return
-
-        # Son bakım saatini baz al (Yoksa 0 kabul et)
         last_maint = device.last_maintenance_hour or 0.0
         diff = current_hours - last_maint
         
-        # Bakım Kuralları (Excel Satır 10-15)
+        # Bakım Kuralları
         rules = [
             {"interval": 50, "tol": 5, "severity": "Warning", "desc": "Günlük Yağlama ve Tork Kontrolü", "rule": "source_10"},
             {"interval": 100, "tol": 10, "severity": "Critical", "desc": "Keçe (Sızdırmazlık) Kontrolü", "rule": "source_11"},
@@ -242,25 +258,13 @@ def check_maintenance_alarms(device_id, current_hours):
         ]
 
         for r in rules:
-            # Modulo (Mod) işlemi ile periyodik kontrol
-            # Örn: 155. saatteyse -> 155 % 50 = 5. (Tolerans içinde)
-            # Amaç: Sadece 50, 100, 150. saatlerin etrafında uyarı vermek.
-            remainder = diff % r["interval"]
-            
-            # Eğer tam bakım saatindeyse (veya tolerans kadar geçmişse) ve henüz bakım yapılmadıysa
-            # Not: Bu mantık basit periyodik kontrol içindir.
-            # Daha gelişmişi: "Son bakım 1000, şu an 1060. Fark 60 > 50. Alarm ver."
-            
             if diff >= r["interval"]:
-                # Bu periyot için zaten AKTİF bir alarm var mı?
                 existing = db.query(AlarmEvent).filter(
                     AlarmEvent.device_id == device_id,
                     AlarmEvent.rule_id == r["rule"],
                     AlarmEvent.is_active == True
                 ).first()
                 
-                # Eğer alarm yoksa ve bakım saati geldiyse (fark interval'i geçtiyse)
-                # Buradaki kritik nokta: Kullanıcı bakımı yapıp 'last_maintenance_hour'u güncelleyene kadar alarm susmaz.
                 if not existing:
                     new_alarm = AlarmEvent(
                         device_id=device_id,
@@ -284,67 +288,73 @@ def check_maintenance_alarms(device_id, current_hours):
 
 def check_telemetry_alarms(device_id, battery_pct, speed_kmh, shock_g, timestamp):
     """
-    [YENİ] Pil, Hız ve Darbe (Shock) alarmlarını kontrol eder.
-    Çağrıldığı yer: Telemetry verisi senkronize edilirken.
+    [YENİ] Pil, Hız ve Darbe alarmları.
+    [GÜNCELLENDİ]: Kullanıcı tercihlerine göre filtreler.
     """
     db = SessionLocal()
     if not timestamp: timestamp = datetime.utcnow()
 
-    # --- [EKLE] Yerel Saat Hesapla ---
+    # Cihaz ve Sahibi Çek
+    device = db.query(Device).options(joinedload(Device.owner)).filter(Device.device_id == device_id).first()
+    if not device or not device.owner:
+        db.close()
+        return
+
+    # Yerel Saat
     local_time, tz_str = get_device_local_time(db, device_id, timestamp)
     local_time_str = local_time.strftime("%H:%M")
-    # ---------------------------------
 
     alarms_to_create = []
 
     try:
-        # 1. PİL KONTROLLERİ
-        if battery_pct is not None:
+        # 1. PİL KONTROLLERİ (İzin varsa)
+        if device.owner.notify_low_battery and battery_pct is not None:
             if battery_pct < 10:
                 alarms_to_create.append({
                     "type": "Düşük Pil", "sev": "Critical", 
-                    "desc": f"Kritik Pil Seviyesi! ({local_time_str})", # <-- Eklendi 
+                    "desc": f"Kritik Pil Seviyesi! ({local_time_str})", 
                     "val": f"%{battery_pct}", "rule": "source_2"
                 })
             elif battery_pct < 20:
                 alarms_to_create.append({
                     "type": "Düşük Pil", "sev": "Warning", 
-                    "desc": f"Pil azalıyor. ({local_time_str})", # <-- Eklendi 
+                    "desc": f"Pil azalıyor. ({local_time_str})", 
                     "val": f"%{battery_pct}", "rule": "source_1"
                 })
 
-        # 2. HIZ KONTROLLERİ
+        # 2. DARBE (SHOCK) KONTROLÜ (İzin varsa)
+        if device.owner.notify_shock and shock_g is not None and shock_g > 7.0:
+            alarms_to_create.append({
+                "type": "Darbe/Kaza", "sev": "Critical", 
+                "desc": f"Yüksek G-Kuvveti Algılandı ({local_time_str})", 
+                "val": f"{shock_g} G", "rule": "source_21"
+            })
+
+        # 3. HIZ KONTROLLERİ (Güvenlik kapsamında her zaman açık kalabilir veya Shock ile bağlanabilir)
+        # Şimdilik açık bırakıyoruz, kullanıcı güvenliği için.
         if speed_kmh is not None:
             if speed_kmh > 120:
                 alarms_to_create.append({
                     "type": "Aşırı Hız", "sev": "Critical", 
-                    "desc": f"Hız Limiti Aşıldı (120 km/s)! ({local_time_str})", # <-- Eklendi 
+                    "desc": f"Hız Limiti Aşıldı (120 km/s)! ({local_time_str})", 
                     "val": f"{speed_kmh} km/s", "rule": "source_4"
                 })
             elif speed_kmh > 90:
                 alarms_to_create.append({
                     "type": "Aşırı Hız", "sev": "Critical", 
-                    "desc": f"Hız Limiti Aşıldı (90 km/s)! ({local_time_str})", # <-- Eklendi 
+                    "desc": f"Hız Limiti Aşıldı (90 km/s)! ({local_time_str})", 
                     "val": f"{speed_kmh} km/s", "rule": "source_3"
                 })
 
-        # 3. DARBE (SHOCK) KONTROLÜ
-        if shock_g is not None and shock_g > 7.0:
-            alarms_to_create.append({
-                "type": "Darbe/Kaza", "sev": "Critical", 
-                "desc": f"Yüksek G-Kuvveti Algılandı ({local_time_str})", # <-- Eklendi 
-                "val": f"{shock_g} G", "rule": "source_21"
-            })
-
         # ALARMLARI OLUŞTUR
         for item in alarms_to_create:
-            # Spam Kontrolü (Son 30 dakikada aynı alarm var mı?)
+            # Spam Kontrolü (30 dk)
             last_alarm = db.query(AlarmEvent).filter(
                 AlarmEvent.device_id == device_id,
                 AlarmEvent.rule_id == item["rule"]
             ).order_by(AlarmEvent.timestamp.desc()).first()
 
-            # Darbe (Shock) her zaman kaydedilmeli, diğerleri için süre kontrolü
+            # Darbe hariç diğerlerinde süre kontrolü
             if item["type"] != "Darbe/Kaza":
                 if last_alarm and (timestamp - last_alarm.timestamp).total_seconds() < 1800:
                     continue
@@ -372,8 +382,7 @@ def check_telemetry_alarms(device_id, battery_pct, speed_kmh, shock_g, timestamp
 
 def check_inactivity_alarms():
     """
-    [GLOBAL-DINAMIK] Haberleşme kopukluğu kontrolü.
-    En son görüldüğü anın yerel saatini de rapora ekler.
+    [GLOBAL-DINAMIK] Haberleşme kopukluğu.
     """
     db = SessionLocal()
     now_utc = datetime.utcnow()
@@ -383,43 +392,30 @@ def check_inactivity_alarms():
         print("\n💤 [ALARM MOTORU] Hareketsizlik kontrolü yapılıyor...")
 
         for dev in devices:
-            # En son telemetri verisini bul
+            # Burası sistemin genel sağlığı ile ilgili, kapatılmasını önermiyoruz.
+            # Ancak yine de maintenance bildirimi kapalıysa es geçilebilir.
+            # Şimdilik açık bırakıyoruz (Kritik).
+
             last_log = db.query(TelemetryLog).filter(
                 TelemetryLog.device_id == dev.device_id
             ).order_by(TelemetryLog.timestamp.desc()).first()
 
             if not last_log: continue
 
-            # --- [EKLE] En Son Görüldüğü Yerel Saati Hesapla ---
-            # last_log.timestamp (UTC) -> Cihazın o andaki konumuna göre Yerel Saat
             local_time, tz_name = get_device_local_time(db, dev.device_id, last_log.timestamp)
             last_seen_str = local_time.strftime("%d.%m.%Y %H:%M")
-            # --------------------------------------------------
 
-            # Ne kadar zaman geçti? (Saat cinsinden)
             diff_hours = (now_utc - last_log.timestamp).total_seconds() / 3600
             diff_days = diff_hours / 24
             
             alarm_data = None
             
-            # İLETİŞİM KOPUKLUĞU (Source 19, 20)
             if diff_hours > 168: # 7 Gün
-                alarm_data = {
-                    "type": "Haberleşme Yok", 
-                    "sev": "Critical", 
-                    "desc": f"7 gündür sinyal alınamıyor. (Son Görülme: {last_seen_str})", 
-                    "rule": "source_20"
-                }
+                alarm_data = {"type": "Haberleşme Yok", "sev": "Critical", "desc": f"7 gündür sinyal alınamıyor. (Son: {last_seen_str})", "rule": "source_20"}
             elif diff_hours > 72: # 3 Gün
-                alarm_data = {
-                    "type": "Haberleşme Yok", 
-                    "sev": "Critical", 
-                    "desc": f"3 gündür sinyal alınamıyor. (Son Görülme: {last_seen_str})", 
-                    "rule": "source_19"
-                }
+                alarm_data = {"type": "Haberleşme Yok", "sev": "Critical", "desc": f"3 gündür sinyal alınamıyor. (Son: {last_seen_str})", "rule": "source_19"}
             
             if alarm_data:
-                # Zaten aktif bir alarm var mı?
                 existing = db.query(AlarmEvent).filter(
                     AlarmEvent.device_id == dev.device_id,
                     AlarmEvent.rule_id == alarm_data["rule"],
@@ -434,7 +430,7 @@ def check_inactivity_alarms():
                         description=alarm_data["desc"],
                         value=f"{int(diff_days)} gün",
                         rule_id=alarm_data["rule"],
-                        timestamp=now_utc, # DB kaydı her zamanki gibi UTC
+                        timestamp=now_utc,
                         is_active=True
                     )
                     db.add(new_alarm)
@@ -446,32 +442,30 @@ def check_inactivity_alarms():
     finally:
         db.close()
 
-import json
-# ... diğer importlar ...
-from backend.models import Setting # Setting modelini import ettiğinden emin ol
-
 def check_work_hours_alarm(device_id, timestamp):
     """
     [GLOBAL-DINAMIK] Mesai Saati Kontrolü
-    Koordinattan saat dilimini bulur ve ona göre kontrol eder.
+    [GÜNCELLENDİ]: Kullanıcı 'notify_geofence' (Güvenlik İhlali) kapattıysa çalışmaz.
     """
     db = SessionLocal()
     
     try:
         if not timestamp: timestamp = datetime.utcnow()
         
-        # --- KRİTİK KISIM: DINAMIK SAAT HESAPLAMA ---
-        # Veritabanına sormadan, koordinat üzerinden hesaplıyoruz.
+        # Cihaz Sahibi Kontrolü (Bekçi)
+        device = db.query(Device).options(joinedload(Device.owner)).filter(Device.device_id == device_id).first()
+        
+        # Eğer kullanıcı Bölge/Güvenlik ihlallerini kapattıysa mesai kontrolü de yapma
+        if not device or not device.owner or not device.owner.notify_geofence:
+            return 
+
         device_local_time, tz_name = get_device_local_time(db, device_id, timestamp)
         
         current_hour = device_local_time.hour
-        weekday = device_local_time.weekday() # 0=Pazartesi
+        weekday = device_local_time.weekday()
 
-        # Genel Mesai Ayarlarını Çek
-        # (Burada Setting modelini import ettiğinden emin ol, dosya başında yoksa buraya ekle)
         setting = db.query(Setting).filter(Setting.key == "work_hours").first()
-        start_hour = 8
-        end_hour = 18
+        start_hour, end_hour = 8, 18
         weekend_allowed = False
 
         if setting:
@@ -509,7 +503,7 @@ def check_work_hours_alarm(device_id, timestamp):
                 description=f"{reason}. Hırsızlık şüphesi.",
                 value=f"Saat: {device_local_time.strftime('%H:%M')}",
                 rule_id="source_8",
-                timestamp=timestamp, # DB'ye UTC kaydediyoruz (Doğrusu bu)
+                timestamp=timestamp,
                 is_active=True
             )
             db.add(new_alarm)

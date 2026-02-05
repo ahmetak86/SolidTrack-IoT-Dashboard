@@ -152,22 +152,52 @@ def get_invite_details(token):
     finally:
         db.close()
 
-def update_user_settings(user_id, settings_dict):
+def update_user_settings(user_id: str, settings: dict):
+    """
+    Kullanıcının panelinden gelen AYARLAR, BİLDİRİMLER ve PROFİL bilgilerini günceller.
+    """
     db = SessionLocal()
     try:
         user = db.query(User).filter(User.id == user_id).first()
-        if user:
-            for key, value in settings_dict.items():
-                if hasattr(user, key):
-                    setattr(user, key, value)
-            db.commit()
-            db.refresh(user)
-            return user
+        if not user:
+            return False, "Kullanıcı bulunamadı."
+        
+        # --- 1. PROFİL BİLGİLERİ (YENİ EKLENDİ) ---
+        if "company_name" in settings: user.company_name = settings["company_name"]
+        if "full_name" in settings: user.full_name = settings["full_name"]
+        if "phone" in settings: user.phone = settings["phone"]
+        if "company_address" in settings: user.company_address = settings["company_address"]
+        if "tax_no" in settings: user.tax_no = settings["tax_no"]         # <-- DİKKAT: tax_no
+        if "tax_office" in settings: user.tax_office = settings["tax_office"]
+
+        # --- 2. SİSTEM AYARLARI ---
+        if "language" in settings: user.language = settings["language"]
+        if "timezone" in settings: user.timezone = settings["timezone"]
+        if "date_format" in settings: user.date_format = settings["date_format"]
+        
+        # Birimler
+        if "unit_length" in settings: user.unit_length = settings["unit_length"]
+        if "unit_temp" in settings: user.unit_temp = settings["unit_temp"]
+        if "unit_pressure" in settings: user.unit_pressure = settings["unit_pressure"]
+        if "unit_volume" in settings: user.unit_volume = settings["unit_volume"]
+
+        # --- 3. BİLDİRİM TERCİHLERİ ---
+        if "notification_email_enabled" in settings: user.notification_email_enabled = settings["notification_email_enabled"]
+        if "notify_low_battery" in settings: user.notify_low_battery = settings["notify_low_battery"]
+        if "notify_shock" in settings: user.notify_shock = settings["notify_shock"]
+        if "notify_geofence" in settings: user.notify_geofence = settings["notify_geofence"]
+        if "notify_maintenance" in settings: user.notify_maintenance = settings["notify_maintenance"]
+        if "notify_daily_report" in settings: user.notify_daily_report = settings["notify_daily_report"]
+        if "notify_weekly_report" in settings: user.notify_weekly_report = settings["notify_weekly_report"]
+        if "notify_monthly_report" in settings: user.notify_monthly_report = settings["notify_monthly_report"]
+
+        db.commit()
+        return True, "Bilgiler başarıyla güncellendi."
     except Exception as e:
         db.rollback()
+        return False, f"Veritabanı Hatası: {str(e)}"
     finally:
         db.close()
-    return None
 
 # ---------------------------------------------------------
 # CİHAZ (DEVICE) İŞLEMLERİ
@@ -1021,136 +1051,322 @@ def get_trusted_api_token():
         print(f"❌ Token Bağlantı Hatası: {e}")
         return None
 
-# backend/database.py İÇİNDEKİ İLGİLİ FONKSİYONLARI BUNLARLA DEĞİŞTİR:
-
-def sync_devices_from_trusted_api(group_id, target_user_id):
-    """
-    GELİŞMİŞ SYNC (V4):
-    1. API'den cihazları çeker.
-    2. Yeni cihazları ekler, var olanları günceller.
-    3. KRİTİK: API listesinde OLMAYAN ama User'da görünen cihazları boşa çıkarır (Temizlik).
-    """
-    db = SessionLocal()
-    added_count = 0
-    updated_count = 0
-    removed_count = 0
-    
-    try:
-        # 1. TOKEN AL
-        token = get_trusted_api_token()
-        if not token:
-            return False, "API Giriş Hatası: Token alınamadı."
-
-        print(f"🌍 Sync Başlıyor... Grup ID: {group_id}")
-        
-        # 2. URL HAZIRLA
-        base = API_BASE_URL.rstrip("/").rstrip("/api") 
-        endpoint = f"{base}/api/Units/Group"
-        
-        params = {"groupId": int(group_id), "Take": 10000, "Skip": 0}
-        headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-        
-        response = requests.get(endpoint, params=params, headers=headers, timeout=20)
-        
-        if response.status_code != 200:
-            return False, f"API Hatası ({response.status_code}): {response.text[:100]}"
-            
-        api_devices = response.json() 
-        if not isinstance(api_devices, list): api_devices = []
-
-        # API'den gelen Seri Numaralarını bir listede tutalım (Temizlik kontrolü için)
-        api_serial_numbers = []
-
-        # 3. VERİTABANINA İŞLEME (EKLEME & GÜNCELLEME)
-        for item in api_devices:
-            dev_id = str(item.get("SerialNumber"))
-            
-            # Listeye ekle (string olarak)
-            if dev_id and dev_id != "None":
-                api_serial_numbers.append(dev_id)
-            else:
-                continue
-
-            dev_name = item.get("UnitName")
-            if not dev_name or dev_name == "null": dev_name = f"Cihaz {dev_id}"
-            dev_model = item.get("ProductTypeName", "T7LTE")
-            
-            # DB Kontrol
-            existing_dev = db.query(Device).filter(Device.device_id == dev_id).first()
-            
-            if existing_dev:
-                # Cihaz zaten varsa ve sahibi biz değilsek veya pasifse güncelle
-                if existing_dev.owner_id != target_user_id or not existing_dev.is_active:
-                    existing_dev.owner_id = target_user_id
-                    existing_dev.is_active = True
-                    updated_count += 1
-            else:
-                # Yoksa yeni oluştur
-                new_dev = Device(
-                    device_id=dev_id, owner_id=target_user_id, unit_name=dev_name,
-                    asset_model=dev_model, is_active=True, is_virtual=False,
-                    icon_type="truck", created_at=datetime.utcnow()
-                )
-                db.add(new_dev)
-                added_count += 1
-        
-        # 4. TEMİZLİK OPERASYONU (CLEANUP)
-        # Bu kullanıcıya zimmetli olan ama API'den gelen listede OLMAYAN cihazları bul
-        # Not: device_id string olduğu için karşılaştırma güvenlidir.
-        if api_serial_numbers:
-            stale_devices = db.query(Device).filter(
-                Device.owner_id == target_user_id,
-                Device.device_id.notin_(api_serial_numbers)
-            ).all()
-            
-            for stale in stale_devices:
-                stale.owner_id = None  # Kullanıcıdan düşür
-                stale.is_active = False # Pasife çek
-                removed_count += 1
-
-        db.commit()
-        
-        summary = f"✅ Sync Tamamlandı:\n➕ {added_count} Yeni Eklendi\n🔄 {updated_count} Güncellendi\n🗑️ {removed_count} Eski Cihaz Kaldırıldı."
-        return True, summary
-
-    except Exception as e:
-        db.rollback()
-        print(f"KRİTİK HATA: {e}")
-        return False, f"Sistem Hatası: {str(e)}"
-    finally:
-        db.close()
-
-
-def update_user_admin_details(user_id, updates):
-    """
-    Admin panelinden gelen güncellemeleri işler.
-    V4 GÜNCELLEMESİ: Artık 'role' değişikliğini de destekliyor.
-    """
+def update_user_admin_details(user_id: str, updates: dict):
+    """Admin panelinden kullanıcı detaylarını günceller."""
     db = SessionLocal()
     try:
         user = db.query(User).filter(User.id == user_id).first()
         if not user:
             return False, "Kullanıcı bulunamadı."
         
-        # CRM Verileri
-        if "admin_note" in updates: user.admin_note = updates["admin_note"]
-        if "device_limit" in updates: user.device_limit = int(updates["device_limit"])
+        # --- MEVCUT ALANLAR ---
         if "is_active" in updates: user.is_active = updates["is_active"]
-        if "trusted_group_id" in updates: user.trusted_group_id = int(updates["trusted_group_id"])
+        if "role" in updates: user.role = updates["role"]
+        if "device_limit" in updates: user.device_limit = updates["device_limit"]
+        if "admin_note" in updates: user.admin_note = updates["admin_note"]
+        if "subscription_end_date" in updates: user.subscription_end_date = updates["subscription_end_date"]
+        if "trusted_group_id" in updates: 
+            val = updates["trusted_group_id"]
+            user.trusted_group_id = str(val) if val else None
+            
+        # --- ŞİRKET VE İLETİŞİM ---
+        if "phone" in updates: user.phone = updates["phone"]
+        if "company_address" in updates: user.company_address = updates["company_address"]
+        if "tax_no" in updates: user.tax_no = updates["tax_no"]
+        if "tax_office" in updates: user.tax_office = updates["tax_office"]
+        if "company_name" in updates: user.company_name = updates["company_name"] # Firma Adı
         
-        # --- YENİ: ROL GÜNCELLEME ---
-        if "role" in updates: 
-            user.role = updates["role"]
-        # ----------------------------
-        
-        # Tarih
-        if "subscription_end_date" in updates:
-            user.subscription_end_date = updates["subscription_end_date"]
+        # --- [YENİ] KİŞİSEL BİLGİLER ---
+        if "first_name" in updates: user.first_name = updates["first_name"]
+        if "last_name" in updates: user.last_name = updates["last_name"]
+        if "country" in updates: user.country = updates["country"]
+
+        # --- [YENİ] BİLDİRİM AYARLARI ---
+        if "notification_email_enabled" in updates: user.notification_email_enabled = updates["notification_email_enabled"]
+        if "notify_low_battery" in updates: user.notify_low_battery = updates["notify_low_battery"]
+        if "notify_shock" in updates: user.notify_shock = updates["notify_shock"]
+        if "notify_geofence" in updates: user.notify_geofence = updates["notify_geofence"]
+        if "notify_maintenance" in updates: user.notify_maintenance = updates["notify_maintenance"]
+        if "notify_daily_report" in updates: user.notify_daily_report = updates["notify_daily_report"]
+        if "notify_weekly_report" in updates: user.notify_weekly_report = updates["notify_weekly_report"]
+        if "notify_monthly_report" in updates: user.notify_monthly_report = updates["notify_monthly_report"]
 
         db.commit()
-        return True, "✅ Müşteri bilgileri güncellendi."
+        return True, "✅ Kullanıcı bilgileri güncellendi."
+    except Exception as e:
+        db.rollback()
+        return False, f"Veritabanı Hatası: {str(e)}"
+    finally:
+        db.close()
+
+# ---------------------------------------------------------
+# YENİ FONKSİYON: GEÇMİŞ VERİYİ API'DEN ÇEKME (BACKFILL)
+# ---------------------------------------------------------
+def backfill_device_history(device_id, days=365):
+    """
+    Geçmiş veriyi çeker. 
+    Düzeltme: Tarih formatı temizlendi ve yedek endpoint eklendi.
+    """
+    db = SessionLocal()
+    count = 0
+    try:
+        token = get_trusted_api_token()
+        if not token: return 0, "Token Alınamadı"
+        
+        # TARİH FORMATI DÜZELTMESİ (Milisaniye ve Z harfini siliyoruz)
+        end_date = datetime.utcnow()
+        start_date = end_date - timedelta(days=days)
+        
+        s_str = start_date.strftime("%Y-%m-%dT%H:%M:%S") # Örn: 2025-01-01T12:00:00
+        e_str = end_date.strftime("%Y-%m-%dT%H:%M:%S")
+        
+        base = API_BASE_URL.rstrip("/").rstrip("/api")
+        
+        # --- DENEME 1: Route Endpoint (Standart) ---
+        endpoint = f"{base}/api/Units/Route" 
+        params = {
+            "serialNumber": device_id,
+            "startDate": s_str,
+            "endDate": e_str,
+            "Take": 100000
+        }
+        headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+        
+        print(f"⏳ Backfill Deneniyor (Route): {device_id} | Tarih: {s_str}")
+        response = requests.get(endpoint, params=params, headers=headers, timeout=45)
+        
+        data = []
+        if response.status_code == 200:
+            data = response.json()
+        else:
+            print(f"⚠️ Route Endpoint Hata verdi ({response.status_code}). Alternatif deneniyor...")
+            
+            # --- DENEME 2: Log Endpoint (Alternatif) ---
+            endpoint_v2 = f"{base}/api/Units/Log"
+            response_v2 = requests.get(endpoint_v2, params=params, headers=headers, timeout=45)
+            if response_v2.status_code == 200:
+                data = response_v2.json()
+                print("✅ Log Endpoint çalıştı!")
+            else:
+                print(f"❌ Alternatif de başarısız: {response_v2.status_code}")
+                return 0, f"API Hatası: {response.status_code} ve {response_v2.status_code}"
+
+        if isinstance(data, list) and len(data) > 0:
+            for point in data:
+                # Timestamp formatı bazen farklı gelebilir, güvenli parse
+                ts_str = point.get("Timestamp")
+                if not ts_str: continue
+                
+                try:
+                    # Gelen verideki Z veya +00:00 temizliği
+                    ts_clean = ts_str.replace("Z", "").split("+")[0]
+                    # Bazen milisaniye nokta ile gelir, bazen gelmez
+                    if "." in ts_clean:
+                        ts = datetime.strptime(ts_clean, "%Y-%m-%dT%H:%M:%S.%f")
+                    else:
+                        ts = datetime.strptime(ts_clean, "%Y-%m-%dT%H:%M:%S")
+                except Exception as e:
+                    continue # Tarih parse edilemezse o satırı atla
+
+                # Mükerrer kontrolü
+                exists = db.query(TelemetryLog).filter(
+                    TelemetryLog.device_id == device_id,
+                    TelemetryLog.timestamp == ts
+                ).first()
+                
+                if not exists:
+                    log = TelemetryLog(
+                        device_id=device_id,
+                        timestamp=ts,
+                        latitude=point.get("Latitude"),
+                        longitude=point.get("Longitude"),
+                        speed=point.get("Speed", 0),
+                        heading=point.get("Heading", 0),
+                        temp_c=point.get("Temperature"),
+                        battery_v=point.get("BatteryVoltage")
+                    )
+                    db.add(log)
+                    count += 1
+            
+            db.commit()
+            print(f"✅ Toplam {count} adet geçmiş veri eklendi.")
+            return count, "Başarılı"
+        else:
+            print("⚠️ API boş liste döndürdü.")
+            return 0, "API'den veri boş döndü (Tarih formatı veya yetki sorunu olabilir)"
+
+    except Exception as e:
+        print(f"❌ Backfill Kritik Hata: {e}")
+        return 0, str(e)
+    finally:
+        db.close()
+
+def update_device_metadata(device_id, new_name, new_icon_type, new_model):
+    """Admin panelinden cihazın ismini, ikonunu ve modelini günceller."""
+    db = SessionLocal()
+    try:
+        device = db.query(Device).filter(Device.device_id == device_id).first()
+        if device:
+            device.unit_name = new_name
+            device.icon_type = new_icon_type
+            device.asset_model = new_model
+            
+            # Profil ID'sini de ikona göre güncelleyelim
+            if new_icon_type == "breaker": device.profile_id = "PROF_BREAKER"
+            elif new_icon_type == "excavator": device.profile_id = "PROF_EXCAVATOR"
+            else: device.profile_id = "PROF_TRANSPORT"
+            
+            db.commit()
+            return True, "✅ Cihaz bilgileri güncellendi."
+        return False, "❌ Cihaz bulunamadı."
     except Exception as e:
         db.rollback()
         return False, f"Hata: {str(e)}"
+    finally:
+        db.close()
+
+def sync_devices_from_trusted_api(group_ids_str, target_user_id):
+    """
+    MASTER SYNC (V8 - ULTIMATE MULTI-GROUP):
+    1. Virgülle ayrılmış grup ID'lerini (Örn: "7153, 9840") döngüye alır.
+    2. Her grup için 'GroupCurrentPosition' endpoint'ini kullanır (Konum + Cihaz).
+    3. Cihazları ve son konumlarını veritabanına işler.
+    4. Bir grup patlasa bile diğerlerini çekmeye devam eder.
+    """
+    db = SessionLocal()
+    total_added = 0
+    total_updated = 0
+    errors = []
+    
+    try:
+        # 1. TOKEN AL
+        token = get_trusted_api_token()
+        if not token: return False, "API Token alınamadı."
+
+        # 2. GRUP ID'LERİNİ AYIKLA
+        if not group_ids_str:
+            return False, "Grup ID boş olamaz."
+        
+        # "7153, 9840" -> ['7153', '9840']
+        group_id_list = [gid.strip() for gid in str(group_ids_str).split(',') if gid.strip()]
+        
+        print(f"🌍 Multi-Sync Başlıyor... Gruplar: {group_id_list}")
+
+        # 3. DÖNGÜYÜ BAŞLAT
+        for group_id in group_id_list:
+            try:
+                print(f"   🔄 İşleniyor: Grup {group_id}...")
+                
+                # En verimli Endpoint: GroupCurrentPosition
+                base = API_BASE_URL.rstrip("/").rstrip("/api") 
+                endpoint = f"{base}/api/Units/GroupCurrentPosition"
+                
+                params = {"groupId": int(group_id), "Take": 10000, "Skip": 0}
+                headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+                
+                response = requests.get(endpoint, params=params, headers=headers, timeout=30)
+                
+                if response.status_code != 200:
+                    err_msg = f"Grup {group_id} Hatası: {response.status_code}"
+                    print(f"   ❌ {err_msg}")
+                    errors.append(err_msg)
+                    continue # Diğer gruba geç
+                    
+                api_data = response.json() 
+                if not isinstance(api_data, list): api_data = []
+
+                # O gruptaki cihazları işle
+                for item in api_data:
+                    unit = item.get("Unit", {})
+                    pos = item.get("CurrentPosition", {})
+                    if not unit: continue
+
+                    dev_id = str(unit.get("SerialNumber"))
+                    
+                    dev_name = unit.get("UnitName")
+                    if not dev_name or dev_name == "null": dev_name = f"Cihaz {dev_id}"
+                    
+                    # Konum verisi
+                    lat = pos.get("Latitude")
+                    lon = pos.get("Longitude")
+                    last_seen = None
+                    if pos.get("Timestamp"):
+                        try: 
+                            ts_str = pos.get("Timestamp").replace("Z", "")
+                            if "." in ts_str: ts_str = ts_str.split(".")[0]
+                            last_seen = datetime.strptime(ts_str, "%Y-%m-%dT%H:%M:%S")
+                        except: pass
+
+                    # --- DB İŞLEMİ ---
+                    existing_dev = db.query(Device).filter(Device.device_id == dev_id).first()
+                    
+                    if existing_dev:
+                        # ZATEN VARSA: Sadece sahibini güncelle ve aktif et
+                        if existing_dev.owner_id != target_user_id:
+                            existing_dev.owner_id = target_user_id
+                            existing_dev.is_active = True
+                            total_updated += 1
+                        
+                        # Konumu tazele (Canlı takip için)
+                        if lat and lon:
+                            existing_dev.last_latitude = lat
+                            existing_dev.last_longitude = lon
+                            existing_dev.last_seen_at = last_seen
+                            
+                    else:
+                        # YENİ CİHAZ
+                        # İkon tipini isme göre otomatik belirle
+                        icon_type = "truck"
+                        name_lower = dev_name.lower()
+                        if "kırıcı" in name_lower or "breaker" in name_lower: icon_type = "breaker"
+                        elif "eks" in name_lower or "exc" in name_lower: icon_type = "excavator"
+
+                        new_dev = Device(
+                            device_id=dev_id,
+                            owner_id=target_user_id,
+                            unit_name=dev_name,
+                            asset_model=unit.get("ProductTypeName", "T7LTE"),
+                            is_active=True,
+                            is_virtual=False,
+                            icon_type=icon_type, # Oto ikon
+                            last_latitude=lat,
+                            last_longitude=lon,
+                            last_seen_at=last_seen,
+                            created_at=datetime.utcnow()
+                        )
+                        db.add(new_dev)
+                        total_added += 1
+                        
+                        # İlk konum logunu at (Harita boş gelmesin)
+                        if lat and lon and last_seen:
+                            log = TelemetryLog(
+                                device_id=dev_id,
+                                timestamp=last_seen,
+                                latitude=lat,
+                                longitude=lon,
+                                speed=pos.get("Speed", 0),
+                                heading=pos.get("Heading", 0)
+                            )
+                            db.add(log)
+                
+                # Bu grup bitti, kaydet
+                db.commit()
+            
+            except Exception as inner_e:
+                print(f"   ❌ Grup {group_id} işlenirken hata: {inner_e}")
+                errors.append(f"Grup {group_id}: {str(inner_e)}")
+                db.rollback()
+
+        # 4. SONUÇ RAPORU
+        msg = f"✅ Sync Tamamlandı. {total_added} Yeni, {total_updated} Güncellendi."
+        if errors:
+            msg += f" (Hatalar: {len(errors)} grup)"
+        
+        return True, msg
+
+    except Exception as e:
+        db.rollback()
+        print(f"KRİTİK HATA: {e}")
+        return False, f"Sistem Hatası: {str(e)}"
     finally:
         db.close()

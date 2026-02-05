@@ -478,8 +478,16 @@ else:
         if "original_admin" in st.session_state and st.session_state["original_admin"]:
             st.sidebar.warning("🕵️‍♂️ Şu an Gözcü Modundasınız")
             if st.sidebar.button("🔙 Admin Hesabıma Dön", use_container_width=True):
+                # 1. Kullanıcıyı geri yükle
                 st.session_state["user"] = st.session_state["original_admin"]
+                
+                # 2. Gözcü kaydını sil
                 del st.session_state["original_admin"]
+                
+                # 3. KRİTİK EKLEME: Menüyü zorla "Müşteri Yönetimi" yap
+                # (Buradaki isim, menü listesindeki emoji dahil isimle BİREBİR aynı olmalı)
+                st.session_state["menu_selection"] = "👥 Müşteri Yönetimi"
+                
                 st.rerun()
                 
         st.markdown("---")
