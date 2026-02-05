@@ -10,7 +10,12 @@ from sqlalchemy.orm import sessionmaker, joinedload
 from passlib.context import CryptContext
 
 # --- IMPORT MODELLER & API ---
-from backend.models import Base, User, Device, TelemetryLog, UtilizationLog, ReportSubscription, GeoSite, AlarmEvent, ShareLink, UtilizationEvent, Setting
+from backend.models import (
+    Base, User, Device, TelemetryLog, UtilizationLog, ReportSubscription, 
+    GeoSite, AlarmEvent, ShareLink, UtilizationEvent, Setting,
+    # AŞAĞIDAKİLER YENİ EKLENENLER (EKSİK OLANLAR BUNLARDI):
+    Operator, DeviceShift, ServiceRecord, Alarm, AlarmRule, DeviceDocument
+)
 from backend.trusted_api import api_create_geosite, api_delete_geosite, api_update_registrations, api_get_geosites
 
 # --- VERİTABANI BAĞLANTISI ---
@@ -203,21 +208,29 @@ def update_user_settings(user_id: str, settings: dict):
 # CİHAZ (DEVICE) İŞLEMLERİ
 # ---------------------------------------------------------
 def get_user_devices(user_id: str):
-    """Yetkiye ve Gruba göre cihazları getirir."""
+    """Yetkiye ve Gruba göre cihazları getirir. (Hata Düzeltildi)"""
     db = SessionLocal()
     try:
         user = db.query(User).filter(User.id == user_id).first()
         if not user: return []
 
+        # BU KISIM EKLENDİ: İlişkili verileri peşin yükle (Eager Load)
+        # Bu sayede veritabanı bağlantısı kopsa bile inventory sayfasında hata almazsın.
+        load_options = (
+            joinedload(Device.service_history),  # Bakım geçmişi için
+            joinedload(Device.shifts),           # Vardiyalar için
+            joinedload(Device.documents)         # Dokümanlar için
+        )
+
         # Süper Adminler
         super_admins = ["s.ozsarac", "a.akkaya"]
         if user.username in super_admins:
-            return db.query(Device).order_by(Device.is_active.desc()).all()
+            return db.query(Device).options(*load_options).order_by(Device.is_active.desc()).all()
 
         # Diğerleri (Grup Bazlı)
-        return db.query(Device).join(User, Device.owner_id == User.id)\
-                 .filter(User.trusted_group_id == user.trusted_group_id)\
-                 .order_by(Device.is_active.desc()).all()
+        return db.query(Device).options(*load_options).join(User, Device.owner_id == User.id)\
+                  .filter(User.trusted_group_id == user.trusted_group_id)\
+                  .order_by(Device.is_active.desc()).all()
     finally:
         db.close()
 
@@ -1368,5 +1381,109 @@ def sync_devices_from_trusted_api(group_ids_str, target_user_id):
         db.rollback()
         print(f"KRİTİK HATA: {e}")
         return False, f"Sistem Hatası: {str(e)}"
+    finally:
+        db.close()
+
+def verify_admin_password(user_id, input_password):
+    """
+    Kritik işlemlerden önce kullanıcının kendi şifresini doğrular.
+    """
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user or not user.password_hash:
+            return False
+        
+        # passlib context'i dosyanın başında tanımlı varsayıyoruz
+        # Eğer pwd_context hatası alırsan en tepeye import eklemelisin
+        return pwd_context.verify(input_password, user.password_hash)
+    except Exception as e:
+        print(f"Şifre doğrulama hatası: {e}")
+        return False
+    finally:
+        db.close()
+
+def get_user_operators(user_id):
+    db = SessionLocal()
+    try:
+        return db.query(Operator).filter(Operator.owner_id == user_id, Operator.is_active == True).all()
+    finally:
+        db.close()
+
+def create_operator(user_id, full_name, phone):
+    db = SessionLocal()
+    try:
+        new_op = Operator(owner_id=user_id, full_name=full_name, phone=phone)
+        db.add(new_op)
+        db.commit()
+        return True, "Operatör eklendi."
+    except Exception as e:
+        db.rollback()
+        return False, str(e)
+    finally:
+        db.close()
+
+# 2. VARDİYA YÖNETİMİ
+def get_device_shifts(device_id):
+    db = SessionLocal()
+    try:
+        return db.query(DeviceShift).filter(DeviceShift.device_id == device_id).all()
+    finally:
+        db.close()
+
+def create_device_shift(device_id, name, start, end, op_id):
+    db = SessionLocal()
+    try:
+        # Operator ID 0 veya None kontrolü
+        op_id_val = int(op_id) if op_id else None
+        
+        new_shift = DeviceShift(
+            device_id=device_id, shift_name=name, 
+            start_time=start.strftime("%H:%M"), 
+            end_time=end.strftime("%H:%M"), 
+            operator_id=op_id_val
+        )
+        db.add(new_shift)
+        db.commit()
+        return True, "Vardiya eklendi."
+    except Exception as e:
+        return False, str(e)
+    finally:
+        db.close()
+
+def delete_device_shift(shift_id):
+    db = SessionLocal()
+    try:
+        shift = db.query(DeviceShift).filter(DeviceShift.id == shift_id).first()
+        if shift:
+            db.delete(shift)
+            db.commit()
+    finally:
+        db.close()
+
+# 3. BAKIM VE SERVİS
+def add_service_record(device_id, tech_name, desc, changed_part, part_no, current_hours, notes):
+    db = SessionLocal()
+    try:
+        # Kayıt Ekle
+        rec = ServiceRecord(
+            device_id=device_id, technician_name=tech_name, description=desc,
+            changed_part=changed_part, part_number=part_no, 
+            usage_hours_at_service=current_hours, total_machine_hours=current_hours,
+            notes=notes
+        )
+        db.add(rec)
+        
+        # Cihazın Bakım Sayacını Güncelle (Sıfırla)
+        dev = db.query(Device).filter(Device.device_id == device_id).first()
+        if dev:
+            dev.last_maintenance_hour = current_hours
+            dev.last_service_date = datetime.utcnow()
+        
+        db.commit()
+        return True
+    except Exception as e:
+        db.rollback()
+        return False
     finally:
         db.close()

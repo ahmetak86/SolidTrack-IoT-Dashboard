@@ -1,42 +1,31 @@
-# update_db.py (FULL GÜNCEL VERSİYON)
-import sqlite3
+import sys
 import os
 
-# Backend klasöründeki DB yolu
-DB_PATH = os.path.join("backend", "solidtrack.db")
+# 1. Proje ana dizinini yola ekleyelim ki 'backend' modülünü bulabilsin
+current_dir = os.path.dirname(os.path.abspath(__file__))
+# Eğer scripts klasörü içindeysek bir üst dizine, ana dizindeysek olduğu yere bakmalı
+parent_dir = os.path.dirname(current_dir) if "scripts" in current_dir else current_dir
+sys.path.append(parent_dir)
 
-def migrate():
-    if not os.path.exists(DB_PATH):
-        print(f"❌ HATA: '{DB_PATH}' bulunamadı!")
-        return
+print(f"📂 Çalışma Dizini: {parent_dir}")
 
-    print(f"🔧 Veritabanı CRM Özellikleri ile Güncelleniyor...")
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
+try:
+    from backend.database import engine
+    from backend.models import Base
     
-    # Eklenecek Yeni Kolonlar
-    new_columns = [
-        ("admin_note", "TEXT"),
-        ("subscription_end_date", "TIMESTAMP"),
-        ("device_limit", "INTEGER DEFAULT 100"),
-        ("last_login_at", "TIMESTAMP"),
-        ("is_active", "BOOLEAN DEFAULT 1"), # Önceden yoksa diye
-        ("trusted_group_id", "INTEGER")
-    ]
-    
-    for col_name, col_type in new_columns:
-        try:
-            cursor.execute(f"ALTER TABLE users ADD COLUMN {col_name} {col_type}")
-            print(f"✅ 'users' tablosuna '{col_name}' eklendi.")
-        except sqlite3.OperationalError as e:
-            if "duplicate column name" in str(e):
-                print(f"ℹ️ '{col_name}' zaten var.")
-            else:
-                print(f"⚠️ Hata ({col_name}): {e}")
+    # Yeni eklediğimiz modellerin de import edildiğinden emin olalım
+    from backend.models import Alarm, AlarmRule, Device, DeviceDocument
 
-    conn.commit()
-    conn.close()
-    print("\n🚀 Veritabanı Hazır! Şimdi panele geçebilirsin.")
+    print("🔄 Veritabanı şeması taranıyor...")
 
-if __name__ == "__main__":
-    migrate()
+    # BU SİHİRLİ KOMUT:
+    # Veritabanına bakar, models.py'da olup da veritabanında OLMAYAN tabloları oluşturur.
+    # Mevcut tablolara (Users, Devices vb.) ve içindeki verilere ASLA zarar vermez.
+    Base.metadata.create_all(bind=engine)
+
+    print("✅ BAŞARILI: Yeni tablolar (Alarm, AlarmRule) oluşturuldu/güncellendi.")
+    print("🚀 Artık uygulamayı çalıştırabilirsiniz.")
+
+except Exception as e:
+    print(f"❌ HATA OLUŞTU: {e}")
+    input("Kapatmak için Enter'a basın...")

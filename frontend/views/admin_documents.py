@@ -100,36 +100,41 @@ def load_view(current_user):
                     
                     if docs:
                         for doc in docs:
-                            with st.container():
-                                c1, c2, c3, c4 = st.columns([3, 2, 2, 2])
-                                c1.write(f"📄 {doc.file_name}")
-                                c2.caption(doc.file_type)
-                                c3.caption(doc.upload_date.strftime('%d.%m.%Y'))
-                                
-                                # SİLME ONAY MEKANİZMASI
-                                delete_key = f"del_btn_{doc.id}"
-                                confirm_key = f"confirm_{doc.id}"
-                                
-                                if confirm_key not in st.session_state:
-                                    st.session_state[confirm_key] = False
-                                
-                                with c4:
-                                    if not st.session_state[confirm_key]:
-                                        if st.button("🗑️ Sil", key=delete_key):
-                                            st.session_state[confirm_key] = True
-                                            st.rerun()
-                                    else:
-                                        col_y, col_n = st.columns(2)
-                                        if col_y.button("✅", key=f"yes_{doc.id}", help="Kesin Sil"):
-                                            delete_document(doc.id)
-                                            del st.session_state[confirm_key]
-                                            st.rerun()
-                                        if col_n.button("❌", key=f"no_{doc.id}", help="Vazgeç"):
-                                            st.session_state[confirm_key] = False
-                                            st.rerun()
-                                st.divider()
+                            # Sütunları genişlettik: İsim | Bilgi | İndir | Sil
+                            c1, c2, c3, c4 = st.columns([3, 2, 1, 1])
+                            
+                            c1.write(f"📄 **{doc.file_name}**")
+                            c2.caption(f"Tip: {doc.file_type} | Tarih: {doc.upload_date.strftime('%d.%m.%Y')}")
+                            
+                            # --- DOWNLOAD BUTONU ---
+                            try:
+                                # Dosyanın sunucuda olup olmadığına bak
+                                if doc.file_path and os.path.exists(doc.file_path):
+                                    with open(doc.file_path, "rb") as f:
+                                        file_bytes = f.read()
+                                    
+                                    c3.download_button(
+                                        label="⬇️ İndir",
+                                        data=file_bytes,
+                                        file_name=doc.file_name,
+                                        mime="application/octet-stream", # Otomatik algılasın
+                                        key=f"dl_{doc.id}"
+                                    )
+                                else:
+                                    c3.warning("Dosya Kayıp")
+                            except Exception as e:
+                                c3.error("Hata")
+                            # -----------------------
+
+                            if c4.button("Sil", key=f"del_{doc.id}"):
+                                delete_document(doc.id)
+                                st.success("Silindi.")
+                                # time modülü import edilmemişse diye local import
+                                import time
+                                time.sleep(0.5)
+                                st.rerun()
                     else:
-                        st.info("Henüz yüklenmiş belge yok.")
+                        st.info("Bu cihaz için henüz doküman yüklenmemiş.")
 
         # TAB 2: SANAL CİHAZ OLUŞTURMA
         with tab2:

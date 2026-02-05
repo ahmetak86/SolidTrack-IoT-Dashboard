@@ -361,10 +361,10 @@ def load_view(user):
     render_bottom_action_bar(df, target_device, ratio, total_working_sec, avg_daily_sec, key_suffix="top")
     st.markdown("---")
 
-    # --- 3. GRAFİKLER ---
+    # 3. GRAFİKLER
     col_g1, col_g2 = st.columns(2)
 
-    # 1. GÜNLÜK ÇALIŞMA GRAFİĞİ
+    # 1. GÜNLÜK ÇALIŞMA GRAFİĞİ (GÜNCELLENDİ)
     with col_g1:
         st.markdown("**Çalışma Süresi (Günlük)**")
         st.caption("Seçilen periyotta makinenin çalışma süresini gün bazında gösterir.")
@@ -380,21 +380,35 @@ def load_view(user):
             labels={"Saat": "Süre (Saat)", "Tarih": ""},
             custom_data=["Tooltip"]
         )
-        fig_daily.update_traces(hovertemplate="<b>%{y:.1f} Saat</b><br>%{customdata[0]}<extra></extra>")
+        
+        # REVİZYON 1: "2.1 Saat" kaldırıldı, sadece detaylı süre yazıyor.
+        fig_daily.update_traces(hovertemplate="%{customdata[0]}<extra></extra>")
+        
         fig_daily.update_layout(
             hovermode="x unified",
             legend=dict(orientation="h", y=-0.2, x=0, xanchor="left", title=None),
             height=350, margin=dict(l=20, r=20, t=10, b=50),
-            xaxis=dict(tickformat="%d/%m")
+            
+            # REVİZYON 2: Font büyütüldü (15px)
+            hoverlabel=dict(font_size=15),
+            
+            xaxis=dict(
+                tickformat="%d/%m",      # Eksende kısa tarih (yer kaplamasın diye)
+                hoverformat="%d.%m.%Y",  # REVİZYON 3: Tooltip'te TAM ve BOLD tarih (19.12.2024)
+                range=[s - timedelta(days=0.5), e + timedelta(days=0.5)],
+                type='date' 
+            )
         )
         st.plotly_chart(fig_daily, use_container_width=True)
 
-    # 2. KÜMÜLATİF ÇALIŞMA GRAFİĞİ
+    # 2. KÜMÜLATİF ÇALIŞMA GRAFİĞİ (GÜNCELLENDİ)
     with col_g2:
         st.markdown("**Çalışma Süresi (Kümülatif)**")
         st.caption("Seçilen periyotta makinenin çalışma süresinin toplamını gösterir.")
 
-        date_range = pd.date_range(start=df['Tarih'].min(), end=df['Tarih'].max(), freq='D').date
+        # Tarih aralığı (Seçilen s ve e tarihlerine göre)
+        date_range = pd.date_range(start=s, end=e, freq='D').date
+        
         idx = pd.MultiIndex.from_product([date_range, CATEGORY_ORDER], names=['Tarih', 'Kategori'])
         cum_data = df.groupby(["Tarih", "Kategori"])["Süre (sn)"].sum().reindex(idx, fill_value=0).reset_index()
         
@@ -409,12 +423,24 @@ def load_view(user):
             labels={"Kümülatif Saat": "Toplam Süre (Saat)", "Tarih": ""},
             custom_data=["Tooltip"]
         )
-        fig_cum.update_traces(hovertemplate="<b>%{y:.1f} Saat</b><br>Toplam: %{customdata[0]}<extra></extra>")
+        
+        # REVİZYON 4: "Toplam:" yazısı ve saat değeri kaldırıldı.
+        fig_cum.update_traces(hovertemplate="%{customdata[0]}<extra></extra>")
+        
         fig_cum.update_layout(
             hovermode="x unified",
             legend=dict(orientation="h", y=-0.2, x=0, xanchor="left", title=None),
             height=350, margin=dict(l=20, r=20, t=10, b=50),
-            xaxis=dict(tickformat="%d/%m")
+            
+            # REVİZYON 5: Font büyütüldü (15px)
+            hoverlabel=dict(font_size=15),
+            
+            xaxis=dict(
+                tickformat="%d/%m",
+                hoverformat="%d.%m.%Y", # REVİZYON 6: Tooltip'te TAM ve BOLD tarih
+                range=[s, e],
+                type='date'
+            )
         )
         st.plotly_chart(fig_cum, use_container_width=True)
 
@@ -443,6 +469,10 @@ def load_view(user):
             stats, values="Süre (sn)", names="Kategori",
             color="Kategori", color_discrete_map=COLOR_MAP,
             hole=0.6
+        )
+        fig_donut.update_traces(
+            textinfo='none', # Grafiğin üstüne yazı yazmasın
+            hovertemplate="<b>%{label}</b><br>Süre(sn)= %{value:,.0f} sn<extra></extra>"
         )
         fig_donut.update_layout(showlegend=False, margin=dict(l=0, r=0, t=20, b=20), height=300)
         fig_donut.add_annotation(text=f"%{ratio:.1f}", x=0.5, y=0.5, font_size=28, showarrow=False, font_weight="bold", font_color="#333")
@@ -522,18 +552,15 @@ def load_view(user):
 
     st.plotly_chart(fig_bar, use_container_width=True)
 
-    # --- 6. KULLANIM DETAYI (TIMELINE) ---
+    # --- 6. KULLANIM DETAYI (TIMELINE) - GÜNCELLENDİ ---
     st.subheader("Kullanım Detayı")
     st.caption("Seçilen periyotta makinenin vuruş sıklığını ve vuruş sayısını gösterir.")
 
-    # Timeline Verileri
-    df["Süre Str"] = df["Süre (sn)"].astype(str) + " sn"
+    # 1. DÜZELTME: Süre formatı (Binlik ayracı var, ondalık yok)
+    df["Süre Str"] = df["Süre (sn)"].apply(lambda x: f"{x:,.0f} sn")
     df["Tarih Str"] = df["StartObj"].dt.strftime('%d.%m.%Y')
     
     # Sıralamayı TERS ÇEVİR (Yeşil Üstte olsun diye)
-    # CATEGORY_ORDER normalde [Yeşil, Turuncu, Kırmızı, Mor] şeklindeydi.
-    # px.timeline genellikle listeyi alttan üste dizer.
-    # O yüzden listeyi TERS ÇEVİRİRSEK [Mor, Kırmızı, Turuncu, Yeşil] olur, Yeşil en üste gelir.
     timeline_order = CATEGORY_ORDER[::-1]
 
     fig_timeline = px.timeline(
@@ -543,13 +570,16 @@ def load_view(user):
         y="Kategori", 
         color="Kategori",
         color_discrete_map=COLOR_MAP,
-        category_orders={"Kategori": timeline_order}, # TERS LİSTE
+        category_orders={"Kategori": timeline_order},
         height=350,
         custom_data=["Tarih Str", "Saat", "Süre Str"]
     )
 
+    # 2. DÜZELTME: Çubukları kalınlaştır (width=0.8) ve Tooltip'i sadeleştir
     fig_timeline.update_traces(
+        width=0.8, # <-- Hassasiyet sorunu burada çözüldü (Daha kalın çubuklar)
         hovertemplate=(
+            "<b>%{y}</b><br>" # Kategori Adı
             "<b>Tarih:</b> %{customdata[0]}<br>"
             "<b>Saat:</b> %{customdata[1]}<br>"
             "<b>Süre:</b> %{customdata[2]}<extra></extra>"
@@ -559,7 +589,6 @@ def load_view(user):
     start_dt = datetime.combine(s, datetime.min.time())
     end_dt = datetime.combine(e, datetime.max.time())
 
-   # --- X EKSENİ (00:00 SORUNU GİDERİLDİ) ---
     fig_timeline.update_layout(
         showlegend=False,
         xaxis=dict(
@@ -568,25 +597,13 @@ def load_view(user):
             range=[start_dt, end_dt],
             tickmode="auto",
             nticks=10,
+            hoverformat="%H:%M:%S", # 3. DÜZELTME: Eksen üzerindeki milisaniyeleri gizle
             
-            # FORMATLAMA KURALLARI
             tickformatstops=[
-                # 1. Çok detaylı zoom (Saniye) -> Saat görünür
                 dict(dtickrange=[None, 1000], value="%H:%M:%S"),
                 dict(dtickrange=[1000, 60000], value="%H:%M:%S"),
-                
-                # 2. Dakika ve Saat zoom (KRİTİK DÜZELTME BURADA)
-                # Üst sınırı 86400000 (1 gün) yerine 86399999 yaptık.
-                # Böylece tam 1 gün (Günlük görünüm) buraya girmez, saat yazmaz.
-                # Ama zoom yapınca (aralık küçülünce) buraya girer ve saati yazar.
                 dict(dtickrange=[60000, 86399999], value="%H:%M\n%d/%m"), 
-                
-                # 3. GÜNLÜK MOD (Sadece Tarih)
-                # Tam 1 gün ve üzeri aralıklarda sadece tarih göster.
-                # 00:00 yazısı burada yer almadığı için silinmiş olur.
                 dict(dtickrange=[86400000, 604800000], value="%d/%m\n%Y"), 
-
-                # 4. Geniş Görünüm (Haftalar/Aylar) -> Sadece Tarih
                 dict(dtickrange=[604800000, None], value="%d/%m\n%Y")
             ]
         ),

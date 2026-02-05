@@ -12,7 +12,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '.
 from backend.database import (
     SessionLocal, User, get_password_hash, Device, 
     sync_devices_from_trusted_api, update_user_admin_details,
-    change_user_password, update_device_metadata
+    change_user_password, update_device_metadata, verify_admin_password
 )
 from backend.trusted_api import api_get_all_subgroups
 
@@ -485,24 +485,86 @@ def load_view(current_user):
                                         ok, msg = update_device_metadata(dev.device_id, new_n, new_t, new_m)
                                         if ok: st.success("OK"); time.sleep(0.5); st.rerun()
                     
-                    # MANUEL SİLME KUTUSU (GÜVENLİ)
+                    # ---------------------------------------------------------
+                    # 1. BÖLÜM: KULLANICIDAN ÇIKARMA (MEVCUT - ŞİFRESİZ)
+                    # ---------------------------------------------------------
                     st.divider()
-                    dev_options = {f"{d.unit_name} ({d.device_id})": d.device_id for d in devices}
-                    selected_devs_to_del = st.multiselect("Cihazları Kullanıcıdan Çıkar:", list(dev_options.keys()))
+                    st.markdown("### 📤 Cihazı Kullanıcıdan Ayır")
+                    st.caption("Cihaz veritabanından silinmez, sadece bu kullanıcıdan çıkarılıp boşa düşürülür.")
                     
-                    if selected_devs_to_del:
+                    dev_options = {f"{d.unit_name} ({d.device_id})": d.device_id for d in devices}
+                    
+                    # Multiselect için benzersiz key
+                    selected_devs_to_unlink = st.multiselect(
+                        "Kullanıcıdan çıkarılacak cihazları seç:", 
+                        list(dev_options.keys()),
+                        key="multi_unlink"
+                    )
+                    
+                    if selected_devs_to_unlink:
                         if st.button("Kullanıcıdan Çıkar (Veriyi Sakla)", type="primary"):
                             db = SessionLocal()
-                            for k in selected_devs_to_del:
-                                dev_id = dev_options[k]
-                                dev = db.query(Device).filter(Device.device_id == dev_id).first()
-                                if dev:
-                                    dev.owner_id = "s.ozsarac" # Varsayılan Admin'e at
-                            db.commit()
-                            db.close()
-                            st.success("Cihazlar ayrıldı.")
-                            time.sleep(1)
-                            st.rerun()
+                            try:
+                                for k in selected_devs_to_unlink:
+                                    dev_id = dev_options[k]
+                                    dev = db.query(Device).filter(Device.device_id == dev_id).first()
+                                    if dev:
+                                        dev.owner_id = "s.ozsarac" # Varsayılan Admin'e veya boşa (None) at
+                                db.commit()
+                                st.success("Seçili cihazlar kullanıcıdan ayrıldı.")
+                                import time
+                                time.sleep(1)
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Hata: {e}")
+                            finally:
+                                db.close()
+
+                    # ---------------------------------------------------------
+                    # 2. BÖLÜM: VERİTABANINDAN SİLME (YENİ - ŞİFRELİ 🔥)
+                    # ---------------------------------------------------------
+                    st.markdown("---")
+                    st.subheader("🚨 TEHLİKELİ BÖLGE: Kalıcı Cihaz Silme")
+                    st.info("Buradan silinen cihazlar **SİSTEMDEN TAMAMEN SİLİNİR**. Geçmiş veriler kaybolur ve işlem geri alınamaz.")
+
+                    # Aynı listeyi kullanıyoruz ama farklı seçim kutusu
+                    selected_devs_to_delete = st.multiselect(
+                        "🔥 Sistemden KALICI olarak silinecek cihazları seç:", 
+                        list(dev_options.keys()),
+                        key="multi_delete_permanent"
+                    )
+
+                    if selected_devs_to_delete:
+                        # Popover (Açılır Pencere) ile Şifre Soruyoruz
+                        with st.popover("🗑️ Kalıcı Silme İşlemini Başlat", use_container_width=True):
+                            st.markdown("### 🔒 Yönetici Onayı")
+                            st.warning(f"DİKKAT: {len(selected_devs_to_delete)} adet cihazı kalıcı olarak silmek üzeresiniz!")
+                            st.write("Bu işlemi onaylamak için lütfen kendi giriş şifrenizi yazın.")
+                            
+                            # Şifre Kutusu
+                            admin_pass_input = st.text_input("Yönetici Şifresi", type="password", key="del_pass_verify")
+                            
+                            # Kırmızı Onay Butonu
+                            if st.button("🔥 Şifreyi Doğrula ve SİL", type="primary"):
+                                # Backend'de şifre kontrolü
+                                if verify_admin_password(current_user.id, admin_pass_input):
+                                    
+                                    success_count = 0
+                                    for k in selected_devs_to_delete:
+                                        d_id = dev_options[k]
+                                        # delete_device_permanently fonksiyonunu çağır
+                                        if delete_device_permanently(d_id):
+                                            success_count += 1
+                                    
+                                    if success_count > 0:
+                                        st.success(f"✅ İşlem Tamam! {success_count} cihaz sistemden tamamen silindi.")
+                                        import time
+                                        time.sleep(2)
+                                        st.rerun()
+                                    else:
+                                        st.error("Silme işlemi sırasında bir hata oluştu.")
+                                else:
+                                    st.error("⛔ Hatalı şifre! İşlem iptal edildi.")
                 else:
                     st.info("Cihaz bulunamadı.")
 
